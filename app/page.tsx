@@ -101,15 +101,12 @@ function drawPolygon(
 
 function solveGable(
   buildingWidth: number,
-  westPlate: number,
-  eastPlate: number,
-  heelHeight: number,
+  westBase: number,
+  eastBase: number,
   pitch: number,
 ) {
   const halfWidth = buildingWidth / 2;
   const slope = Math.max(pitch / 12, 0.001);
-  const westBase = westPlate + heelHeight;
-  const eastBase = eastPlate + heelHeight;
   const rawRidgeX = (eastBase - westBase) / (2 * slope);
   const ridgeX = Math.max(-halfWidth, Math.min(halfWidth, rawRidgeX));
   const ridgeElevation = westBase + slope * (ridgeX + halfWidth);
@@ -126,21 +123,21 @@ function makeRoofFaces(
   kind: RoofKind,
   buildingWidth: number,
   buildingDepth: number,
-  plateHeights: number[],
-  heelHeight: number,
+  bearingElevations: number[],
   pitch: number,
+  roofResolved: boolean,
 ) {
+  if (!roofResolved) return [];
   const w = buildingWidth / 2;
   const d = buildingDepth / 2;
-  const northBase = plateHeights[0] + heelHeight;
-  const eastBase = plateHeights[1] + heelHeight;
-  const southBase = plateHeights[2] + heelHeight;
-  const westBase = plateHeights[3] + heelHeight;
+  const northBase = bearingElevations[0];
+  const eastBase = bearingElevations[1];
+  const southBase = bearingElevations[2];
+  const westBase = bearingElevations[3];
   const gable = solveGable(
     buildingWidth,
-    plateHeights[3],
-    plateHeights[1],
-    heelHeight,
+    westBase,
+    eastBase,
     pitch,
   );
   const faces: RoofFace[] = [];
@@ -173,7 +170,7 @@ function makeRoofFaces(
   }
 
   if (kind === "hip") {
-    const base = (northBase + eastBase + southBase + westBase) / 4;
+    const base = northBase;
     const ridge = base + w * (pitch / 12);
     const ridgeEnd = Math.max(0, d - w);
     faces.push(
@@ -243,7 +240,9 @@ export default function Home() {
   const [buildingWidth, setBuildingWidth] = useState(28);
   const [buildingDepth, setBuildingDepth] = useState(40);
   const [plateHeights, setPlateHeights] = useState([9, 9, 9, 9]);
-  const [heelHeight, setHeelHeight] = useState(0.75);
+  const [bearingOffsets, setBearingOffsets] = useState([
+    0.75, 0.75, 0.75, 0.75,
+  ]);
   const [pitch, setPitch] = useState(6);
   const [selectedEdge, setSelectedEdge] = useState(1);
   const [selectedPlane, setSelectedPlane] = useState("east-plane");
@@ -265,23 +264,33 @@ export default function Home() {
   const didOrbit = useRef(false);
 
   const roles = PRESETS[roofKind].roles;
+  const bearingElevations = plateHeights.map(
+    (height, index) => height + bearingOffsets[index],
+  );
+  const effectivePitch =
+    roofKind === "shed"
+      ? (Math.abs(bearingElevations[1] - bearingElevations[3]) /
+          buildingWidth) *
+        12
+      : pitch;
   const gableSolution = solveGable(
     buildingWidth,
-    plateHeights[3],
-    plateHeights[1],
-    heelHeight,
-    pitch,
+    bearingElevations[3],
+    bearingElevations[1],
+    effectivePitch,
   );
+  const hipBearingSpread =
+    Math.max(...bearingElevations) - Math.min(...bearingElevations);
+  const hipVariableConflict = roofKind === "hip" && hipBearingSpread > 0.01;
+  const roofResolved =
+    roofKind === "hip" ? !hipVariableConflict : gableSolution.resolved;
   const ridgeElevation =
     roofKind === "shed"
-      ? Math.max(plateHeights[1], plateHeights[3]) + heelHeight
+      ? Math.max(bearingElevations[1], bearingElevations[3])
       : roofKind === "gable"
         ? gableSolution.ridgeElevation
-        : plateHeights.reduce((sum, height) => sum + height, 0) / 4 +
-          heelHeight +
+        : bearingElevations[0] +
           (buildingWidth / 2) * (pitch / 12);
-  const variablePlates = new Set(plateHeights).size > 1;
-  const hipVariableConflict = roofKind === "hip" && variablePlates;
   const selectedRole = roles[selectedEdge];
   const selectedDrivesRoof =
     selectedRole === "bearing" ||
@@ -293,7 +302,7 @@ export default function Home() {
     setBuildingWidth(28);
     setBuildingDepth(40);
     setPlateHeights([9, 9, 9, 9]);
-    setHeelHeight(0.75);
+    setBearingOffsets([0.75, 0.75, 0.75, 0.75]);
     setPitch(6);
     setSelectedEdge(1);
     setSelectedPlane("east-plane");
@@ -307,15 +316,20 @@ export default function Home() {
     setPlateHeights((current) =>
       current.map((height, index) => (index === selectedEdge ? value : height)),
     );
-    if (roofKind === "shed" && (selectedEdge === 1 || selectedEdge === 3)) {
-      const opposite = selectedEdge === 1 ? plateHeights[3] : plateHeights[1];
-      const derivedPitch = (Math.abs(value - opposite) / buildingWidth) * 12;
-      setPitch(Math.max(1, Math.min(14, Math.round(derivedPitch))));
-    }
   };
 
   const setAllPlateHeights = (value: number) => {
     setPlateHeights([value, value, value, value]);
+  };
+
+  const setSelectedBearingOffset = (value: number) => {
+    setBearingOffsets((current) =>
+      current.map((offset, index) => (index === selectedEdge ? value : offset)),
+    );
+  };
+
+  const setAllBearingOffsets = (value: number) => {
+    setBearingOffsets([value, value, value, value]);
   };
 
   const setAuthoredPitch = (value: number) => {
@@ -323,7 +337,12 @@ export default function Home() {
     if (roofKind === "shed") {
       setPlateHeights((current) =>
         current.map((height, index) =>
-          index === 1 ? current[3] + buildingWidth * (value / 12) : height,
+          index === 1
+            ? current[3] +
+              bearingOffsets[3] +
+              buildingWidth * (value / 12) -
+              bearingOffsets[1]
+            : height,
         ),
       );
     }
@@ -402,7 +421,15 @@ export default function Home() {
     context.strokeStyle = "#d97834";
     context.lineWidth = 2;
     context.beginPath();
-    if (roofKind === "gable") {
+    if (!roofResolved) {
+      context.setLineDash([7, 5]);
+      context.strokeRect(left + 9, top + 9, rectWidth - 18, rectHeight - 18);
+      context.setLineDash([]);
+      context.fillStyle = "#b45427";
+      context.font = "700 9px monospace";
+      context.textAlign = "center";
+      context.fillText("UNRESOLVED SUPPORTS", width / 2, middle);
+    } else if (roofKind === "gable") {
       const ridgePlanX =
         left + ((gableSolution.ridgeX + buildingWidth / 2) / buildingWidth) * rectWidth;
       context.moveTo(ridgePlanX, top);
@@ -442,6 +469,7 @@ export default function Home() {
     gableSolution.ridgeX,
     plateHeights,
     roofKind,
+    roofResolved,
     selectedEdge,
   ]);
 
@@ -471,20 +499,50 @@ export default function Home() {
     context.fillRect(0, 0, width, height);
     const w = buildingWidth / 2;
     const d = buildingDepth / 2;
+    const roofHeightAtX = (x: number) => {
+      if (roofKind === "shed") {
+        const t = (x + w) / buildingWidth;
+        return (
+          bearingElevations[3] +
+          (bearingElevations[1] - bearingElevations[3]) * t
+        );
+      }
+      if (x <= gableSolution.ridgeX) {
+        return (
+          bearingElevations[3] +
+          (x + w) * (Math.max(effectivePitch, 0.001) / 12)
+        );
+      }
+      return (
+        bearingElevations[1] +
+        (w - x) * (Math.max(effectivePitch, 0.001) / 12)
+      );
+    };
+    const endWall = (edge: 0 | 2) => {
+      const z = edge === 0 ? -d : d;
+      const wallHeight = plateHeights[edge];
+      const top: Point3[] = [];
+      for (let index = 0; index <= 16; index += 1) {
+        const x = w - (index / 16) * buildingWidth;
+        const clippedHeight =
+          roofResolved && roofKind !== "hip"
+            ? Math.min(wallHeight, roofHeightAtX(x))
+            : wallHeight;
+        top.push({ x, y: clippedHeight, z });
+      }
+      return [
+        { x: -w, y: 0, z },
+        { x: w, y: 0, z },
+        ...top,
+      ];
+    };
 
     if (showWalls) {
       const wallFaces = [
         {
-          height: plateHeights[0],
-          points: [
-            { x: w, y: 0, z: -d },
-            { x: -w, y: 0, z: -d },
-            { x: -w, y: plateHeights[0], z: -d },
-            { x: w, y: plateHeights[0], z: -d },
-          ],
+          points: endWall(0),
         },
         {
-          height: plateHeights[1],
           points: [
             { x: w, y: 0, z: -d },
             { x: w, y: plateHeights[1], z: -d },
@@ -493,16 +551,9 @@ export default function Home() {
           ],
         },
         {
-          height: plateHeights[2],
-          points: [
-          { x: -w, y: 0, z: d },
-          { x: w, y: 0, z: d },
-            { x: w, y: plateHeights[2], z: d },
-            { x: -w, y: plateHeights[2], z: d },
-          ],
+          points: endWall(2),
         },
         {
-          height: plateHeights[3],
           points: [
             { x: -w, y: 0, z: d },
             { x: -w, y: plateHeights[3], z: d },
@@ -539,9 +590,9 @@ export default function Home() {
       roofKind,
       buildingWidth,
       buildingDepth,
-      plateHeights,
-      heelHeight,
-      pitch,
+      bearingElevations,
+      effectivePitch,
+      roofResolved,
     ).sort(
       (a, b) =>
         a.points.reduce(
@@ -581,21 +632,68 @@ export default function Home() {
       );
     }
 
+    if (!roofResolved) {
+      context.fillStyle = "#b45427";
+      context.font = "700 10px monospace";
+      context.fillText("ROOF FORM UNRESOLVED", 18, 44);
+      context.fillStyle = "#716a61";
+      context.font = "500 9px monospace";
+      context.fillText("Bearing rails do not define one continuous solid.", 18, 60);
+    }
+
     if (showDatums) {
-      const datumHeight = plateHeights[selectedEdge];
-      const start = project({ x: -w - 4, y: datumHeight, z: d + 2 });
-      const end = project({ x: w + 7, y: datumHeight, z: d + 2 });
-      context.setLineDash([5, 5]);
+      const edgePoints = (edge: number, elevation: number): Point3[] => {
+        if (edge === 0)
+          return [
+            { x: -w, y: elevation, z: -d },
+            { x: w, y: elevation, z: -d },
+          ];
+        if (edge === 1)
+          return [
+            { x: w, y: elevation, z: -d },
+            { x: w, y: elevation, z: d },
+          ];
+        if (edge === 2)
+          return [
+            { x: w, y: elevation, z: d },
+            { x: -w, y: elevation, z: d },
+          ];
+        return [
+          { x: -w, y: elevation, z: d },
+          { x: -w, y: elevation, z: -d },
+        ];
+      };
+      const plateRail = edgePoints(selectedEdge, plateHeights[selectedEdge]).map(project);
       context.strokeStyle = "#16838a";
-      context.lineWidth = 1.5;
+      context.lineWidth = 2.5;
       context.beginPath();
-      context.moveTo(start.x, start.y);
-      context.lineTo(end.x, end.y);
+      context.moveTo(plateRail[0].x, plateRail[0].y);
+      context.lineTo(plateRail[1].x, plateRail[1].y);
       context.stroke();
-      context.setLineDash([]);
       context.fillStyle = "#126a70";
       context.font = "600 10px monospace";
-      context.fillText("T.O. PLATE", end.x - 66, end.y - 8);
+      context.fillText("WALL TOP / PLATE", plateRail[1].x - 84, plateRail[1].y - 8);
+
+      if (selectedDrivesRoof) {
+        const bearingRail = edgePoints(
+          selectedEdge,
+          bearingElevations[selectedEdge],
+        ).map(project);
+        context.setLineDash([5, 4]);
+        context.strokeStyle = "#d97834";
+        context.lineWidth = 2;
+        context.beginPath();
+        context.moveTo(bearingRail[0].x, bearingRail[0].y);
+        context.lineTo(bearingRail[1].x, bearingRail[1].y);
+        context.stroke();
+        context.setLineDash([]);
+        context.fillStyle = "#a95829";
+        context.fillText(
+          "ROOF BEARING BASE",
+          bearingRail[1].x - 99,
+          bearingRail[1].y - 8,
+        );
+      }
     }
 
     context.fillStyle = "#25211d";
@@ -604,12 +702,15 @@ export default function Home() {
   }, [
     buildingDepth,
     buildingWidth,
-    heelHeight,
+    bearingElevations,
+    effectivePitch,
+    gableSolution.ridgeX,
     orbit,
-    pitch,
     plateHeights,
+    roofResolved,
     roofKind,
     selectedEdge,
+    selectedDrivesRoof,
     selectedPlane,
     showDatums,
     showTopology,
@@ -623,14 +724,19 @@ export default function Home() {
     if (!ready) return;
     const { context, width, height } = ready;
     const floor = height - 25;
-    const sy = (height - 50) / (ridgeElevation + 1.5);
+    const maxElevation = Math.max(
+      ridgeElevation,
+      ...plateHeights,
+      ...bearingElevations,
+    );
+    const sy = (height - 50) / (maxElevation + 1.5);
     const sx = (width - 58) / (buildingWidth + 10);
     const x = (value: number) => width / 2 + value * sx;
     const y = (value: number) => floor - value * sy;
     const westPlate = plateHeights[3];
     const eastPlate = plateHeights[1];
-    const westBase = westPlate + heelHeight;
-    const eastBase = eastPlate + heelHeight;
+    const westBase = bearingElevations[3];
+    const eastBase = bearingElevations[1];
 
     context.fillStyle = "#fbfaf7";
     context.fillRect(0, 0, width, height);
@@ -659,39 +765,53 @@ export default function Home() {
     context.stroke();
     context.setLineDash([]);
 
-    context.strokeStyle = "#d97834";
-    context.lineWidth = 8;
-    context.lineCap = "round";
-    context.beginPath();
-    context.moveTo(x(-buildingWidth / 2), y(westBase));
-    if (roofKind === "shed") {
-      context.lineTo(x(buildingWidth / 2), y(eastBase));
-    } else if (roofKind === "gable") {
-      context.lineTo(
-        x(gableSolution.ridgeX),
-        y(gableSolution.ridgeElevation),
-      );
-      context.lineTo(x(buildingWidth / 2), y(eastBase));
+    if (roofResolved) {
+      context.strokeStyle = "#d97834";
+      context.lineWidth = 8;
+      context.lineCap = "round";
+      context.beginPath();
+      context.moveTo(x(-buildingWidth / 2), y(westBase));
+      if (roofKind === "shed") {
+        context.lineTo(x(buildingWidth / 2), y(eastBase));
+      } else if (roofKind === "gable") {
+        context.lineTo(
+          x(gableSolution.ridgeX),
+          y(gableSolution.ridgeElevation),
+        );
+        context.lineTo(x(buildingWidth / 2), y(eastBase));
+      } else {
+        context.lineTo(width / 2, y(ridgeElevation));
+        context.lineTo(x(buildingWidth / 2), y(eastBase));
+      }
+      context.stroke();
     } else {
-      context.lineTo(width / 2, y(ridgeElevation));
-      context.lineTo(x(buildingWidth / 2), y(eastBase));
+      context.fillStyle = "#b45427";
+      context.font = "700 10px monospace";
+      context.fillText("NO CONTINUOUS ROOF SECTION", width / 2 - 83, 28);
+      context.fillStyle = "#716a61";
+      context.font = "500 9px monospace";
+      context.fillText(
+        "Resolve bearing-base elevations before generating the solid.",
+        width / 2 - 151,
+        44,
+      );
     }
-    context.stroke();
 
     context.fillStyle = "#126a70";
     context.font = "600 9px monospace";
     context.fillText("WEST PLATE", 22, y(westPlate) - 7);
     context.fillText("EAST PLATE", width - 83, y(eastPlate) - 7);
     context.fillStyle = "#5c554c";
-    context.fillText(`${pitch}:12`, width - 55, 20);
+    context.fillText(`${effectivePitch.toFixed(1)}:12`, width - 68, 20);
   }, [
+    bearingElevations,
     buildingWidth,
+    effectivePitch,
     gableSolution.ridgeElevation,
     gableSolution.ridgeX,
-    heelHeight,
-    pitch,
     plateHeights,
     ridgeElevation,
+    roofResolved,
     roofKind,
   ]);
 
@@ -713,7 +833,12 @@ export default function Home() {
     if (kind === "shed") {
       setPlateHeights((current) =>
         current.map((height, index) =>
-          index === 1 ? current[3] + buildingWidth * (pitch / 12) : height,
+          index === 1
+            ? current[3] +
+              bearingOffsets[3] +
+              buildingWidth * (pitch / 12) -
+              bearingOffsets[1]
+            : height,
         ),
       );
     }
@@ -795,22 +920,25 @@ export default function Home() {
           <div className="control-section">
             <ControlHeading number="03" title="Structural rules" />
             <Range
-              label="Pitch"
-              value={pitch}
+              label={roofKind === "shed" ? "Target pitch" : "Pitch"}
+              value={roofKind === "shed" ? effectivePitch : pitch}
               min={1}
               max={14}
-              step={1}
-              output={`${pitch}:12`}
+              step={0.5}
+              output={`${effectivePitch.toFixed(1)}:12`}
               onChange={setAuthoredPitch}
             />
             <Range
-              label="Plane above plate"
-              value={heelHeight}
-              min={0.25}
-              max={3}
+              label="Level roof-base offsets"
+              value={
+                bearingOffsets.reduce((sum, offset) => sum + offset, 0) /
+                bearingOffsets.length
+              }
+              min={0}
+              max={12}
               step={0.25}
-              output={feetInches(heelHeight)}
-              onChange={setHeelHeight}
+              output="Set all edges"
+              onChange={setAllBearingOffsets}
             />
           </div>
 
@@ -861,7 +989,11 @@ export default function Home() {
           <ViewPanel
             className="form-panel"
             eyebrow="FORM / STRUCTURE"
-            title="Coherent roof volume"
+            title={
+              roofResolved
+                ? "Coherent roof volume"
+                : "No coherent roof volume"
+            }
             extra={
               <div className="view-tabs">
                 <button className="active">Solid</button>
@@ -934,7 +1066,7 @@ export default function Home() {
           <ViewPanel
             className="section-panel"
             eyebrow="SECTION / DATUM CHECK"
-            title="Bearing relationship"
+            title={roofResolved ? "Bearing relationship" : "Constraint conflict"}
           >
             <canvas
               ref={sectionRef}
@@ -950,41 +1082,63 @@ export default function Home() {
           >
             <dl className="property-list">
               <div><dt>Intent</dt><dd>{roleLabel(roles[selectedEdge])}</dd></div>
-              <div><dt>Support datum</dt><dd>Wall-specific T.O. Plate</dd></div>
-              <div><dt>Roof plane</dt><dd>{pitch}:12 structural plane</dd></div>
+              <div>
+                <dt>Wall top / plate</dt>
+                <dd>{feetInches(plateHeights[selectedEdge])}</dd>
+              </div>
+              <div>
+                <dt>Roof bearing base</dt>
+                <dd>
+                  {selectedDrivesRoof
+                    ? feetInches(bearingElevations[selectedEdge])
+                    : "Not a support"}
+                </dd>
+              </div>
+              <div>
+                <dt>Roof plane</dt>
+                <dd>
+                  {roofResolved
+                    ? `${effectivePitch.toFixed(1)}:12`
+                    : "Unresolved"}
+                </dd>
+              </div>
               <div>
                 <dt>Relationship</dt>
-                <dd className={hipVariableConflict ? "warning" : "healthy"}>
-                  {hipVariableConflict
-                    ? "Needs transition"
+                <dd className={!roofResolved ? "warning" : "healthy"}>
+                  {!roofResolved
+                    ? "Contradictory supports"
                     : selectedDrivesRoof
                       ? "Driving roof"
-                      : "Wall only"}
+                      : "Clipped by roof"}
                 </dd>
               </div>
             </dl>
             <div className="edge-height-control">
               <Range
-                label={`${EDGE_LABELS[selectedEdge]} plate height`}
+                label="Wall top / plate elevation"
                 value={plateHeights[selectedEdge]}
                 min={6}
-                max={18}
+                max={30}
                 step={0.25}
                 output={feetInches(plateHeights[selectedEdge])}
                 onChange={setSelectedPlateHeight}
               />
-            </div>
-            <div className="derived-block">
-              <span>DERIVED, NOT AUTHORED</span>
-              <p>
-                {roofKind === "gable"
-                  ? `Ridge shifts ${Math.abs(gableSolution.ridgeX).toFixed(2)}′ ${
-                      gableSolution.ridgeX < 0 ? "west" : "east"
-                    }`
-                  : roofKind === "shed"
-                    ? `Pitch follows ${feetInches(plateHeights[3])} → ${feetInches(plateHeights[1])}`
-                    : "Hip transitions require a compound solver"}
-              </p>
+              {selectedDrivesRoof ? (
+                <Range
+                  label="Roof base above plate"
+                  value={bearingOffsets[selectedEdge]}
+                  min={0}
+                  max={12}
+                  step={0.25}
+                  output={`+ ${feetInches(bearingOffsets[selectedEdge])}`}
+                  onChange={setSelectedBearingOffset}
+                />
+              ) : (
+                <p className="relationship-note">
+                  This wall is clipped by the solved roof; it does not position
+                  the structural form.
+                </p>
+              )}
             </div>
           </ViewPanel>
         </section>
@@ -992,22 +1146,21 @@ export default function Home() {
 
       <footer className="statusbar">
         <span>
-          <i className={hipVariableConflict ? "warning-dot" : "healthy-dot"} />
-          {hipVariableConflict
-            ? "Variable hip plates need an explicit transition"
-            : gableSolution.resolved
-              ? "Variable plate relationships resolved"
-              : "Plate difference exceeds available roof slope"}
+          <i className={!roofResolved ? "warning-dot" : "healthy-dot"} />
+          {!roofResolved
+            ? "No roof solid: bearing-base elevations are contradictory"
+            : "Wall tops, bearing rails, section, and 3D form agree"}
         </span>
         <span>
           {makeRoofFaces(
             roofKind,
             buildingWidth,
             buildingDepth,
-            plateHeights,
-            heelHeight,
-            pitch,
-          ).length} planes · 1 structural form
+            bearingElevations,
+            effectivePitch,
+            roofResolved,
+          ).length}{" "}
+          planes · {roofResolved ? 1 : 0} structural form
         </span>
         <span>Eaves and finish assemblies deferred</span>
       </footer>
