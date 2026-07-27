@@ -910,10 +910,10 @@ export default function Home() {
                   didOrbit.current = true;
                 }
                 setOrbit({
-                  yaw: drag.yaw + (event.clientX - drag.x) * 0.45,
+                  yaw: drag.yaw - (event.clientX - drag.x) * 0.45,
                   pitch: Math.max(
                     8,
-                    Math.min(72, drag.pitch - (event.clientY - drag.y) * 0.35),
+                    Math.min(72, drag.pitch + (event.clientY - drag.y) * 0.35),
                   ),
                 });
               }}
