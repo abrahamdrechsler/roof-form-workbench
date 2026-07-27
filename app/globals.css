@@ -322,7 +322,7 @@ input[type="range"] {
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(400px, 1.25fr) minmax(330px, 1fr);
-  grid-template-rows: minmax(380px, 1fr) 220px;
+  grid-template-rows: minmax(360px, 1fr) 270px;
   gap: 1px;
   background: var(--line);
 }
@@ -388,9 +388,12 @@ canvas {
   display: block;
 }
 
-.plan-panel canvas,
-.form-panel canvas {
+.plan-panel canvas {
   cursor: crosshair;
+}
+
+.form-panel canvas {
+  cursor: grab;
 }
 
 .canvas-note,
@@ -406,6 +409,14 @@ canvas {
 .canvas-note {
   left: 14px;
   bottom: 11px;
+}
+
+.orbit-note {
+  color: #4c453d;
+  background: rgba(255, 255, 255, 0.82);
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
 }
 
 .orientation {
@@ -478,6 +489,18 @@ canvas {
   color: var(--teal);
 }
 
+.warning {
+  color: #b45427;
+}
+
+.edge-height-control {
+  padding: 0 16px 5px;
+}
+
+.edge-height-control .range-control {
+  margin-top: 5px;
+}
+
 .derived-block {
   margin: 0 16px 14px;
   padding: 9px 10px;
@@ -516,6 +539,15 @@ canvas {
   display: inline-block;
   margin-right: 6px;
   background: var(--teal);
+  border-radius: 50%;
+}
+
+.warning-dot {
+  width: 6px;
+  height: 6px;
+  display: inline-block;
+  margin-right: 6px;
+  background: #c45f2a;
   border-radius: 50%;
 }
 
