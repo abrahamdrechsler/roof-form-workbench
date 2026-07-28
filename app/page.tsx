@@ -580,19 +580,21 @@ export default function Home() {
     const ready = prepareCanvas(canvas);
     if (!ready) return;
     const { context, width, height } = ready;
-    const origin = { x: width * 0.5, y: height * 0.76 };
+    const origin = { x: width * 0.5, y: height * 0.53 };
     const scale = Math.min(width / 70, height / 46);
     const yaw = (orbit.yaw * Math.PI) / 180;
     const cameraPitch = (orbit.pitch * Math.PI) / 180;
+    const pivotY = ridgeElevation / 2;
     const project = (point: Point3) => {
       const horizontal = point.x * Math.cos(yaw) - point.z * Math.sin(yaw);
       const depth = point.x * Math.sin(yaw) + point.z * Math.cos(yaw);
+      const vertical = point.y - pivotY;
       return {
         x: origin.x + horizontal * scale,
         y:
           origin.y +
           depth * scale * Math.sin(cameraPitch) -
-          point.y * scale * Math.cos(cameraPitch),
+          vertical * scale * Math.cos(cameraPitch),
       };
     };
 
@@ -808,6 +810,7 @@ export default function Home() {
     gableSolution.ridgeX,
     orbit,
     plateHeights,
+    ridgeElevation,
     roofResolved,
     roofKind,
     selectedEdge,
@@ -1119,7 +1122,6 @@ export default function Home() {
             <canvas
               ref={formRef}
               aria-label="Three dimensional structural roof form"
-              onContextMenu={(event) => event.preventDefault()}
               onClick={() => {
                 if (didOrbit.current) {
                   didOrbit.current = false;
@@ -1134,9 +1136,10 @@ export default function Home() {
                 );
               }}
               onPointerDown={(event) => {
-                if (event.button !== 2) return;
+                if (event.button !== 0) return;
                 event.preventDefault();
                 event.currentTarget.setPointerCapture(event.pointerId);
+                event.currentTarget.style.cursor = "grabbing";
                 didOrbit.current = false;
                 orbitDrag.current = {
                   pointerId: event.pointerId,
@@ -1159,19 +1162,24 @@ export default function Home() {
                 setOrbit({
                   yaw: drag.yaw - (event.clientX - drag.x) * 0.45,
                   pitch: Math.max(
-                    8,
-                    Math.min(72, drag.pitch + (event.clientY - drag.y) * 0.35),
+                    -85,
+                    Math.min(85, drag.pitch + (event.clientY - drag.y) * 0.35),
                   ),
                 });
               }}
               onPointerUp={(event) => {
                 if (orbitDrag.current?.pointerId !== event.pointerId) return;
                 event.currentTarget.releasePointerCapture(event.pointerId);
+                event.currentTarget.style.cursor = "grab";
+                orbitDrag.current = null;
+              }}
+              onPointerCancel={(event) => {
+                event.currentTarget.style.cursor = "grab";
                 orbitDrag.current = null;
               }}
             />
             <div className="canvas-note orbit-note">
-              Right-click + drag to orbit
+              Left-click + drag to orbit
             </div>
             <div className="orientation">
               {Math.round(((orbit.yaw % 360) + 360) % 360)}°
