@@ -602,6 +602,66 @@ export default function Home() {
     context.fillRect(0, 0, width, height);
     const w = buildingWidth / 2;
     const d = buildingDepth / 2;
+    const groundHalfExtent =
+      Math.ceil((Math.max(buildingWidth, buildingDepth) * 0.75) / 4) * 4;
+    const groundElevation = -0.04;
+    const groundCorners: Point3[] = [
+      { x: -groundHalfExtent, y: groundElevation, z: -groundHalfExtent },
+      { x: groundHalfExtent, y: groundElevation, z: -groundHalfExtent },
+      { x: groundHalfExtent, y: groundElevation, z: groundHalfExtent },
+      { x: -groundHalfExtent, y: groundElevation, z: groundHalfExtent },
+    ];
+
+    drawPolygon(
+      context,
+      groundCorners.map(project),
+      "rgba(22, 131, 138, 0.045)",
+      "rgba(22, 131, 138, 0.18)",
+      1,
+    );
+
+    for (
+      let coordinate = -groundHalfExtent;
+      coordinate <= groundHalfExtent;
+      coordinate += 4
+    ) {
+      const isCenterAxis = coordinate === 0;
+      context.strokeStyle = isCenterAxis
+        ? "rgba(22, 131, 138, 0.34)"
+        : "rgba(113, 106, 97, 0.17)";
+      context.lineWidth = isCenterAxis ? 1.35 : 0.75;
+
+      const xStart = project({
+        x: coordinate,
+        y: groundElevation,
+        z: -groundHalfExtent,
+      });
+      const xEnd = project({
+        x: coordinate,
+        y: groundElevation,
+        z: groundHalfExtent,
+      });
+      context.beginPath();
+      context.moveTo(xStart.x, xStart.y);
+      context.lineTo(xEnd.x, xEnd.y);
+      context.stroke();
+
+      const zStart = project({
+        x: -groundHalfExtent,
+        y: groundElevation,
+        z: coordinate,
+      });
+      const zEnd = project({
+        x: groundHalfExtent,
+        y: groundElevation,
+        z: coordinate,
+      });
+      context.beginPath();
+      context.moveTo(zStart.x, zStart.y);
+      context.lineTo(zEnd.x, zEnd.y);
+      context.stroke();
+    }
+
     const roofHeightAtX = (x: number) => {
       if (roofKind === "shed") {
         const t = (x + w) / buildingWidth;
