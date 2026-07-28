@@ -898,20 +898,15 @@ export default function Home() {
       const cornerElevations = roofPoints.map((_, index) => {
         const previousEdge =
           (index + roofPoints.length - 1) % roofPoints.length;
-        return Math.min(
-          edgeElevation(previousEdge),
-          edgeElevation(index),
-        );
+        const previousElevation = edgeElevation(previousEdge);
+        const currentElevation = edgeElevation(index);
+        const previousChange = Math.abs(previousElevation - roofBase);
+        const currentChange = Math.abs(currentElevation - roofBase);
+        return currentChange >= previousChange
+          ? currentElevation
+          : previousElevation;
       });
       const edgeProfiles = roofEdges.map((edge) => {
-        const length = segmentLength(edge.start, edge.end);
-        const transitionFraction = length > 0 ? 0.2 : 0;
-        const pointAlongEdge = (amount: number) => ({
-          x: edge.start.x + (edge.end.x - edge.start.x) * amount,
-          z: edge.start.z + (edge.end.z - edge.start.z) * amount,
-        });
-        const plateauStart = pointAlongEdge(transitionFraction);
-        const plateauEnd = pointAlongEdge(1 - transitionFraction);
         return {
           edge,
           points: [
@@ -919,16 +914,6 @@ export default function Home() {
               x: edge.start.x,
               y: cornerElevations[edge.index],
               z: edge.start.z,
-            },
-            {
-              x: plateauStart.x,
-              y: edgeElevation(edge.index),
-              z: plateauStart.z,
-            },
-            {
-              x: plateauEnd.x,
-              y: edgeElevation(edge.index),
-              z: plateauEnd.z,
             },
             {
               x: edge.end.x,
@@ -941,7 +926,7 @@ export default function Home() {
           ],
         };
       });
-      const faces = edgeProfiles.flatMap(({ edge, points }) => {
+      const faces = edgeProfiles.map(({ edge, points }) => {
         const edgeMidpoint = midpoint(edge.start, edge.end);
         let target = peak;
         if (roofKind === "gable") {
@@ -955,34 +940,10 @@ export default function Home() {
           );
           target = distanceA < distanceB ? ridgeA : ridgeB;
         }
-        const startTransitions =
-          Math.abs(points[0].y - points[1].y) > 0.001;
-        const endTransitions =
-          Math.abs(points[2].y - points[3].y) > 0.001;
-        const mainStart = startTransitions ? points[1] : points[0];
-        const mainEnd = endTransitions ? points[2] : points[3];
-        return [
-          ...(startTransitions
-            ? [
-                {
-                  index: edge.index,
-                  points: [points[0], points[1], target],
-                },
-              ]
-            : []),
-          {
-            index: edge.index,
-            points: [mainStart, mainEnd, target],
-          },
-          ...(endTransitions
-            ? [
-                {
-                  index: edge.index,
-                  points: [points[2], points[3], target],
-                },
-              ]
-            : []),
-        ];
+        return {
+          index: edge.index,
+          points: [...points, target],
+        };
       });
       faces
         .sort((a, b) => {
@@ -1048,8 +1009,8 @@ export default function Home() {
         });
         context.stroke();
         const middle = {
-          x: (projectedProfile[1].x + projectedProfile[2].x) / 2,
-          y: (projectedProfile[1].y + projectedProfile[2].y) / 2,
+          x: (projectedProfile[0].x + projectedProfile[1].x) / 2,
+          y: (projectedProfile[0].y + projectedProfile[1].y) / 2,
         };
         context.beginPath();
         context.arc(
@@ -1982,9 +1943,9 @@ export default function Home() {
               </div>
               <div className="detail-inspector-note">
                 This eave is independently positioned from the fixed roof base.
-                Its center run stays horizontal while the ends slope to shared
-                corner elevations. The ridge stays fixed, so moving this eave
-                changes the adjacent face slopes.
+                It stays horizontal end-to-end while neighboring eaves absorb
+                the corner transitions. The ridge stays fixed, so moving this
+                eave changes the adjacent roof plane.
               </div>
               <dl className="inspector-data">
                 <div>
