@@ -105,6 +105,33 @@ p {
   gap: 8px;
 }
 
+.layout-switch {
+  display: flex;
+  padding: 3px;
+  background: #efede8;
+  border: 1px solid #e2ded6;
+  border-radius: 6px;
+}
+
+.layout-switch button {
+  min-width: 45px;
+  height: 26px;
+  padding: 0 10px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.layout-switch button.active {
+  color: var(--ink);
+  background: white;
+  box-shadow: 0 1px 3px rgba(40, 35, 30, 0.15);
+}
+
 .status-chip {
   margin-right: 8px;
   padding: 4px 7px;
@@ -332,10 +359,15 @@ input[type="range"] {
   min-width: 0;
   overflow: hidden;
   display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr) minmax(205px, 0.62fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: minmax(0, 1fr);
   gap: 1px;
   background: var(--line);
+}
+
+.drawing-area.plan-view,
+.drawing-area.form-view {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .view-panel {
@@ -441,6 +473,49 @@ canvas {
   place-items: center;
   border: 1px solid var(--line);
   border-radius: 50%;
+}
+
+.edge-inspector {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  width: min(260px, calc(100% - 28px));
+  padding: 12px 14px 10px;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  box-shadow: 0 8px 24px rgba(48, 42, 35, 0.12);
+  backdrop-filter: blur(7px);
+}
+
+.edge-inspector-heading,
+.edge-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.edge-inspector-heading h3 {
+  margin: 3px 0 0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.edge-summary {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid #ece9e3;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.edge-summary strong {
+  font-weight: 700;
+}
+
+.edge-inspector .range-control {
+  margin-top: 10px;
 }
 
 .view-tabs {
@@ -577,8 +652,7 @@ canvas {
   }
 
   .drawing-area {
-    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) minmax(200px, 0.62fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .control-panel {
@@ -707,7 +781,7 @@ canvas {
   }
 
   .drawing-area {
-    grid-template-rows: minmax(0, 1fr) minmax(170px, 0.68fr);
+    grid-template-rows: minmax(0, 1fr);
   }
 
   .view-panel {
@@ -723,21 +797,10 @@ canvas {
     margin-top: 2px;
   }
 
-  .property-list {
-    padding: 4px 10px;
-  }
-
-  .property-list div {
-    padding: 4px 0;
-  }
-
-  .property-list div:nth-child(2),
-  .property-list div:nth-child(3) {
-    display: none;
-  }
-
-  .edge-height-control {
-    padding: 0 10px 2px;
+  .edge-inspector {
+    bottom: 10px;
+    padding-top: 9px;
+    padding-bottom: 7px;
   }
 
   .derived-block {
@@ -756,7 +819,7 @@ canvas {
   }
 
   .drawing-area {
-    grid-template-rows: minmax(0, 1fr) minmax(145px, 0.7fr);
+    grid-template-rows: minmax(0, 1fr);
   }
 
   .derived-block {

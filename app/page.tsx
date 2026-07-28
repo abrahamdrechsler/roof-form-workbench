@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 type RoofKind = "gable" | "hip" | "shed";
 type EdgeRole = "bearing" | "gable" | "high" | "low";
+type ViewMode = "split" | "plan" | "form";
 type Point3 = { x: number; y: number; z: number };
 type RoofFace = {
   id: string;
@@ -339,6 +340,7 @@ export default function Home() {
   const [showDatums, setShowDatums] = useState(true);
   const [showTopology, setShowTopology] = useState(true);
   const [orbit, setOrbit] = useState({ yaw: -42, pitch: 24 });
+  const [viewMode, setViewMode] = useState<ViewMode>("split");
 
   const planRef = useRef<HTMLCanvasElement>(null);
   const formRef = useRef<HTMLCanvasElement>(null);
@@ -1002,7 +1004,7 @@ export default function Home() {
     drawAll();
     window.addEventListener("resize", drawAll);
     return () => window.removeEventListener("resize", drawAll);
-  }, [drawForm, drawPlan, drawSection]);
+  }, [drawForm, drawPlan, drawSection, viewMode]);
 
   const chooseKind = (kind: RoofKind) => {
     setRoofKind(kind);
@@ -1033,6 +1035,24 @@ export default function Home() {
           </div>
         </div>
         <div className="topbar-actions">
+          <div className="layout-switch" aria-label="Workspace view">
+            {(
+              [
+                ["split", "Split"],
+                ["plan", "2D"],
+                ["form", "3D"],
+              ] as [ViewMode, string][]
+            ).map(([mode, label]) => (
+              <button
+                key={mode}
+                className={viewMode === mode ? "active" : ""}
+                aria-pressed={viewMode === mode}
+                onClick={() => setViewMode(mode)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <span className="status-chip">MVP 01</span>
           <button className="ghost-button" onClick={reset}>Reset</button>
           <button className="primary-button">Save study</button>
@@ -1136,18 +1156,19 @@ export default function Home() {
           </div>
         </aside>
 
-        <section className="drawing-area">
-          <ViewPanel
-            className="plan-panel"
-            eyebrow="PLAN / BEARING INTENT"
-            title="Top-of-plate footprint"
-            extra={
-              <div className="legend">
-                <span><i className="legend-line bearing" /> Plate rail</span>
-                <span><i className="legend-line roof" /> Derived topology</span>
-              </div>
-            }
-          >
+        <section className={`drawing-area ${viewMode}-view`}>
+          {viewMode !== "form" && (
+            <ViewPanel
+              className="plan-panel"
+              eyebrow="PLAN / BEARING INTENT"
+              title="Top-of-plate footprint"
+              extra={
+                <div className="legend">
+                  <span><i className="legend-line bearing" /> Plate rail</span>
+                  <span><i className="legend-line roof" /> Derived topology</span>
+                </div>
+              }
+            >
             <canvas
               ref={planRef}
               aria-label="Plan view of roof bearing footprint"
@@ -1162,23 +1183,76 @@ export default function Home() {
               }}
             />
             <div className="canvas-note">Select an edge to inspect its intent</div>
-          </ViewPanel>
-
-          <ViewPanel
-            className="form-panel"
-            eyebrow="FORM / STRUCTURE"
-            title={
-              roofResolved
-                ? "Coherent roof volume"
-                : "No coherent roof volume"
-            }
-            extra={
-              <div className="view-tabs">
-                <button className="active">Solid</button>
-                <button onClick={() => setShowTopology(!showTopology)}>Planes</button>
+            <aside className="edge-inspector">
+              <div className="edge-inspector-heading">
+                <div>
+                  <span className="view-label">SELECTED WALL</span>
+                  <h3>{EDGE_LABELS[selectedEdge]} edge</h3>
+                </div>
+                <span className="selection-index">E{selectedEdge + 1}</span>
               </div>
-            }
-          >
+              <div className="edge-summary">
+                <span>{roleLabel(roles[selectedEdge])}</span>
+                <strong
+                  className={
+                    !roofResolved || hipVariableTransition
+                      ? "warning"
+                      : "healthy"
+                  }
+                >
+                  {!roofResolved
+                    ? "Conflict"
+                    : hipVariableTransition
+                      ? "Corners adjust"
+                      : selectedDrivesRoof
+                        ? "Driving roof"
+                        : "Clipped by roof"}
+                </strong>
+              </div>
+              <Range
+                label="Wall top / plate"
+                value={plateHeights[selectedEdge]}
+                min={6}
+                max={30}
+                step={0.25}
+                output={feetInches(plateHeights[selectedEdge])}
+                onChange={setSelectedPlateHeight}
+              />
+              {selectedDrivesRoof ? (
+                <Range
+                  label="Roof base above plate"
+                  value={bearingOffsets[selectedEdge]}
+                  min={0}
+                  max={12}
+                  step={0.25}
+                  output={`+ ${feetInches(bearingOffsets[selectedEdge])}`}
+                  onChange={setSelectedBearingOffset}
+                />
+              ) : (
+                <p className="relationship-note">
+                  This wall is clipped by the solved roof.
+                </p>
+              )}
+            </aside>
+            </ViewPanel>
+          )}
+
+          {viewMode !== "plan" && (
+            <ViewPanel
+              className="form-panel"
+              eyebrow="FORM / STRUCTURE"
+              title={
+                roofResolved
+                  ? "Coherent roof volume"
+                  : "No coherent roof volume"
+              }
+              extra={
+                <div className="view-tabs">
+                  <button className="active">Solid</button>
+                  <button onClick={() => setShowTopology(!showTopology)}>Planes</button>
+                </div>
+              }
+            >
             <canvas
               ref={formRef}
               aria-label="Three dimensional structural roof form"
@@ -1244,94 +1318,8 @@ export default function Home() {
             <div className="orientation">
               {Math.round(((orbit.yaw % 360) + 360) % 360)}°
             </div>
-          </ViewPanel>
-
-          <ViewPanel
-            className="section-panel"
-            eyebrow="SECTION / DATUM CHECK"
-            title={roofResolved ? "Bearing relationship" : "Constraint conflict"}
-          >
-            <canvas
-              ref={sectionRef}
-              aria-label="Section showing roof and top of plate"
-            />
-          </ViewPanel>
-
-          <ViewPanel
-            className="inspector-panel"
-            eyebrow="SELECTION"
-            title={`${EDGE_LABELS[selectedEdge]} edge`}
-            extra={<span className="selection-index">E{selectedEdge + 1}</span>}
-          >
-            <dl className="property-list">
-              <div><dt>Intent</dt><dd>{roleLabel(roles[selectedEdge])}</dd></div>
-              <div>
-                <dt>Wall top / plate</dt>
-                <dd>{feetInches(plateHeights[selectedEdge])}</dd>
-              </div>
-              <div>
-                <dt>Roof bearing base</dt>
-                <dd>
-                  {selectedDrivesRoof
-                    ? feetInches(bearingElevations[selectedEdge])
-                    : "Not a support"}
-                </dd>
-              </div>
-              <div>
-                <dt>Roof plane</dt>
-                <dd>
-                  {roofResolved
-                    ? `${effectivePitch.toFixed(1)}:12`
-                    : "Unresolved"}
-                </dd>
-              </div>
-              <div>
-                <dt>Relationship</dt>
-                <dd
-                  className={
-                    !roofResolved || hipVariableTransition
-                      ? "warning"
-                      : "healthy"
-                  }
-                >
-                  {!roofResolved
-                    ? "Contradictory supports"
-                    : hipVariableTransition
-                      ? "Driving · corners adjust"
-                    : selectedDrivesRoof
-                      ? "Driving roof"
-                      : "Clipped by roof"}
-                </dd>
-              </div>
-            </dl>
-            <div className="edge-height-control">
-              <Range
-                label="Wall top / plate elevation"
-                value={plateHeights[selectedEdge]}
-                min={6}
-                max={30}
-                step={0.25}
-                output={feetInches(plateHeights[selectedEdge])}
-                onChange={setSelectedPlateHeight}
-              />
-              {selectedDrivesRoof ? (
-                <Range
-                  label="Roof base above plate"
-                  value={bearingOffsets[selectedEdge]}
-                  min={0}
-                  max={12}
-                  step={0.25}
-                  output={`+ ${feetInches(bearingOffsets[selectedEdge])}`}
-                  onChange={setSelectedBearingOffset}
-                />
-              ) : (
-                <p className="relationship-note">
-                  This wall is clipped by the solved roof; it does not position
-                  the structural form.
-                </p>
-              )}
-            </div>
-          </ViewPanel>
+            </ViewPanel>
+          )}
         </section>
       </div>
 
