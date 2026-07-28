@@ -1036,6 +1036,76 @@ export default function Home() {
         context.stroke();
       });
 
+      walls.forEach((wall) => {
+        const wallMidpoint = midpoint(wall.start, wall.end);
+        const wallDepth =
+          (wallMidpoint.x - center.x) * Math.sin(yaw) +
+          (wallMidpoint.z - center.z) * Math.cos(yaw);
+        if (wallDepth < -0.01) return;
+
+        const wallHeight = wallHeights[wall.index] ?? 9;
+        const selectedWall =
+          selection?.kind === "wall" && selection.index === wall.index;
+        const samples: {
+          point: Point2;
+          roofHeight: number;
+        }[] = [];
+        const groups: {
+          point: Point2;
+          roofHeight: number;
+        }[][] = [];
+
+        for (let sample = 0; sample <= 32; sample += 1) {
+          const amount = sample / 32;
+          const point = {
+            x: wall.start.x + (wall.end.x - wall.start.x) * amount,
+            z: wall.start.z + (wall.end.z - wall.start.z) * amount,
+          };
+          const roofHeight = roofSurfaceAt(point);
+          if (roofHeight !== null && wallHeight > roofHeight + 0.01) {
+            samples.push({ point, roofHeight });
+          } else if (samples.length) {
+            groups.push([...samples]);
+            samples.length = 0;
+          }
+        }
+        if (samples.length) groups.push([...samples]);
+
+        groups.forEach((group) => {
+          if (group.length < 2) return;
+          const intersection = group.map(({ point, roofHeight }) =>
+            project({ x: point.x, y: roofHeight, z: point.z }),
+          );
+
+          if (!clipWalls) {
+            const top = [...group]
+              .reverse()
+              .map(({ point }) =>
+                project({ x: point.x, y: wallHeight, z: point.z }),
+              );
+            drawPolygon(
+              context,
+              [...intersection, ...top],
+              selectedWall
+                ? "rgba(22, 131, 138, 0.20)"
+                : "rgba(222, 217, 207, 0.96)",
+              selectedWall ? "#16838a" : "#8f887f",
+              selectedWall ? 2.5 : 1.25,
+            );
+          }
+
+          context.strokeStyle = selectedWall ? "#08767e" : "#625b53";
+          context.lineWidth = selectedWall ? 3 : 2;
+          context.lineCap = "round";
+          context.beginPath();
+          context.moveTo(intersection[0].x, intersection[0].y);
+          intersection
+            .slice(1)
+            .forEach((point) => context.lineTo(point.x, point.y));
+          context.stroke();
+        });
+      });
+
       if (showDatums) {
         context.fillStyle = "#126a70";
         context.font = "600 8px monospace";
