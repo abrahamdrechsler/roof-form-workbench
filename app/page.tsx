@@ -455,6 +455,10 @@ export default function Home() {
   const [viewMode, setViewMode] = useState<ViewMode>("split");
   const [selected3DWall, setSelected3DWall] = useState<number | null>(null);
   const [wallHeightDraft, setWallHeightDraft] = useState("9.00");
+  const [wallHandlePosition, setWallHandlePosition] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
   const [eaveCatalog, setEaveCatalog] = useState<EaveCondition[]>(
     INITIAL_EAVE_CONDITIONS,
   );
@@ -488,6 +492,11 @@ export default function Home() {
     y: number;
     yaw: number;
     pitch: number;
+  } | null>(null);
+  const wallHeightDrag = useRef<{
+    pointerId: number;
+    startY: number;
+    startHeight: number;
   } | null>(null);
   const didOrbit = useRef(false);
 
@@ -547,6 +556,7 @@ export default function Home() {
     setOrbit({ yaw: -42, pitch: 24 });
     setSelected3DWall(null);
     setWallHeightDraft("9.00");
+    setWallHandlePosition(null);
     setEaveCatalog(INITIAL_EAVE_CONDITIONS);
     setEdgeEaveIds([
       "rafter-seat",
@@ -979,6 +989,33 @@ export default function Home() {
           selected ? 2.5 : 1,
         );
       });
+    }
+
+    if (showWalls && selected3DWall !== null) {
+      const selectedHeight =
+        (selected3DWall === 0 || selected3DWall === 2) &&
+        roofResolved &&
+        roofKind !== "hip"
+          ? Math.min(plateHeights[selected3DWall], roofHeightAtX(0))
+          : plateHeights[selected3DWall];
+      const handlePoint: Point3 =
+        selected3DWall === 0
+          ? { x: 0, y: selectedHeight, z: -d }
+          : selected3DWall === 1
+            ? { x: w, y: selectedHeight, z: 0 }
+            : selected3DWall === 2
+              ? { x: 0, y: selectedHeight, z: d }
+              : { x: -w, y: selectedHeight, z: 0 };
+      const projectedHandle = project(handlePoint);
+      setWallHandlePosition((current) =>
+        current &&
+        Math.abs(current.x - projectedHandle.x) < 0.25 &&
+        Math.abs(current.y - projectedHandle.y) < 0.25
+          ? current
+          : projectedHandle,
+      );
+    } else {
+      setWallHandlePosition((current) => (current ? null : current));
     }
 
     const faces = makeRoofFaces(
@@ -1806,6 +1843,78 @@ export default function Home() {
             <div className="orientation">
               {Math.round(((orbit.yaw % 360) + 360) % 360)}°
             </div>
+            {showWalls &&
+              selected3DWall !== null &&
+              wallHandlePosition && (
+                <button
+                  className="wall-height-handle"
+                  style={{
+                    left: wallHandlePosition.x,
+                    top: wallHandlePosition.y,
+                  }}
+                  aria-label={`Drag to change ${EDGE_LABELS[selected3DWall]} wall height`}
+                  onPointerDown={(event) => {
+                    if (event.button !== 0 || selected3DWall === null) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                    wallHeightDrag.current = {
+                      pointerId: event.pointerId,
+                      startY: event.clientY,
+                      startHeight: plateHeights[selected3DWall],
+                    };
+                  }}
+                  onPointerMove={(event) => {
+                    const drag = wallHeightDrag.current;
+                    if (
+                      !drag ||
+                      drag.pointerId !== event.pointerId ||
+                      selected3DWall === null
+                    ) {
+                      return;
+                    }
+                    const canvas = formRef.current;
+                    if (!canvas) return;
+                    const rect = canvas.getBoundingClientRect();
+                    const canvasScale = Math.min(
+                      rect.width / 70,
+                      rect.height / 46,
+                    );
+                    const cameraPitch = (orbit.pitch * Math.PI) / 180;
+                    const pixelsPerFoot =
+                      canvasScale *
+                      Math.max(0.25, Math.abs(Math.cos(cameraPitch)));
+                    const rawHeight =
+                      drag.startHeight +
+                      (drag.startY - event.clientY) / pixelsPerFoot;
+                    const nextHeight = Math.max(
+                      6,
+                      Math.min(30, Math.round(rawHeight * 4) / 4),
+                    );
+                    setPlateHeights((current) =>
+                      current.map((height, index) =>
+                        index === selected3DWall ? nextHeight : height,
+                      ),
+                    );
+                    setWallHeightDraft(nextHeight.toFixed(2));
+                  }}
+                  onPointerUp={(event) => {
+                    if (wallHeightDrag.current?.pointerId !== event.pointerId) {
+                      return;
+                    }
+                    event.currentTarget.releasePointerCapture(event.pointerId);
+                    wallHeightDrag.current = null;
+                  }}
+                  onPointerCancel={() => {
+                    wallHeightDrag.current = null;
+                  }}
+                >
+                  <span className="wall-height-arrows" aria-hidden="true">
+                    ↑<i />↓
+                  </span>
+                  <output>{feetInches(plateHeights[selected3DWall])}</output>
+                </button>
+              )}
             {selected3DEave !== null && (
               <div className="wall-height-popover eave-assignment-popover">
                 <div className="wall-height-popover-heading">

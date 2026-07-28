@@ -706,6 +706,66 @@ canvas {
   grid-template-columns: 1fr 1fr;
 }
 
+.wall-height-handle {
+  position: absolute;
+  z-index: 5;
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  padding: 0;
+  color: var(--teal);
+  background: transparent;
+  border: 0;
+  cursor: ns-resize;
+  touch-action: none;
+  transform: translate(-50%, -50%);
+  user-select: none;
+}
+
+.wall-height-arrows {
+  width: 30px;
+  height: 48px;
+  display: grid;
+  grid-template-rows: 1fr 7px 1fr;
+  place-items: center;
+  color: white;
+  background: var(--teal);
+  border: 2px solid white;
+  border-radius: 15px;
+  box-shadow:
+    0 0 0 1px var(--teal),
+    0 5px 14px rgba(22, 131, 138, 0.28);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.wall-height-arrows i {
+  width: 4px;
+  height: 4px;
+  display: block;
+  background: white;
+  border-radius: 50%;
+}
+
+.wall-height-handle output {
+  padding: 3px 6px;
+  color: white;
+  background: var(--ink);
+  border: 1px solid white;
+  border-radius: 4px;
+  box-shadow: 0 2px 7px rgba(40, 35, 30, 0.22);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 8px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.wall-height-handle:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 4px;
+}
+
 .wall-height-popover {
   position: absolute;
   top: 14px;
