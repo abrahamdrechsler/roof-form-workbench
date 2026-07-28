@@ -637,6 +637,8 @@ export default function Home() {
     setEaveCatalog((current) => [...current, condition]);
     setShowEaveCreator(false);
     setSelectedCatalogId(condition.id);
+    setSelected3DWall(null);
+    setSelected3DEave(null);
     setCatalogEditDraft({
       name: condition.name,
       driver: condition.driver,
@@ -647,6 +649,8 @@ export default function Home() {
 
   const openCatalogInspector = (condition: EaveCondition) => {
     setSelectedCatalogId(condition.id);
+    setSelected3DWall(null);
+    setSelected3DEave(null);
     setCatalogEditDraft({
       name: condition.name,
       driver: condition.driver,
@@ -1764,80 +1768,14 @@ export default function Home() {
                   Math.abs(y - roofBottom),
                   Math.abs(x - roofLeft),
                 ];
-                setSelectedEdge(distances.indexOf(Math.min(...distances)));
+                const edge = distances.indexOf(Math.min(...distances));
+                setSelectedEdge(edge);
+                setSelected3DEave(edge);
+                setSelected3DWall(null);
+                setSelectedCatalogId(null);
               }}
             />
             <div className="canvas-note">Select an edge to inspect its intent</div>
-            <aside className="edge-inspector">
-              <div className="edge-inspector-heading">
-                <div>
-                  <span className="view-label">SELECTED WALL / ROOF EDGE</span>
-                  <h3>{EDGE_LABELS[selectedEdge]} edge</h3>
-                </div>
-                <span className="selection-index">E{selectedEdge + 1}</span>
-              </div>
-              <div className="edge-summary">
-                <span>{roleLabel(roles[selectedEdge])}</span>
-                <strong
-                  className={
-                    !roofResolved || hipVariableTransition
-                      ? "warning"
-                      : "healthy"
-                  }
-                >
-                  {!roofResolved
-                    ? "Conflict"
-                    : hipVariableTransition
-                      ? "Corners adjust"
-                      : selectedDrivesRoof
-                        ? "Driving roof"
-                        : "Clipped by roof"}
-                </strong>
-              </div>
-              <Range
-                label="Wall top / plate"
-                value={plateHeights[selectedEdge]}
-                min={6}
-                max={30}
-                step={0.25}
-                output={feetInches(plateHeights[selectedEdge])}
-                onChange={setSelectedPlateHeight}
-              />
-              <label className="condition-select">
-                <span>Wall / roof condition</span>
-                <select
-                  value={edgeEaveIds[selectedEdge]}
-                  onChange={(event) =>
-                    assignEaveCondition(selectedEdge, event.target.value)
-                  }
-                >
-                  {eaveCatalog.map((condition) => (
-                    <option key={condition.id} value={condition.id}>
-                      {condition.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="condition-coordinate compact">
-                <span>X {feetInches(bearingInsets[selectedEdge])} inboard</span>
-                <span>Y +{feetInches(bearingOffsets[selectedEdge])}</span>
-              </div>
-              <Range
-                label="Independent overhang"
-                value={edgeOverhangs[selectedEdge]}
-                min={0}
-                max={8}
-                step={0.25}
-                output={feetInches(edgeOverhangs[selectedEdge])}
-                onChange={(value) =>
-                  setEdgeOverhangs((current) =>
-                    current.map((overhang, index) =>
-                      index === selectedEdge ? value : overhang,
-                    ),
-                  )
-                }
-              />
-            </aside>
             </ViewPanel>
           )}
 
@@ -1888,6 +1826,7 @@ export default function Home() {
                   setSelectedEdge(eave.edge);
                   setSelected3DEave(eave.edge);
                   setSelected3DWall(null);
+                  setSelectedCatalogId(null);
                   return;
                 }
                 const wall = [...formWallRegions.current]
@@ -1897,11 +1836,13 @@ export default function Home() {
                   setSelectedEdge(wall.edge);
                   setSelected3DWall(wall.edge);
                   setSelected3DEave(null);
+                  setSelectedCatalogId(null);
                   setWallHeightDraft(plateHeights[wall.edge].toFixed(2));
                   return;
                 }
                 setSelected3DWall(null);
                 setSelected3DEave(null);
+                setSelectedCatalogId(null);
                 setSelectedPlane(
                   roofKind === "shed"
                     ? "shed-plane"
@@ -2031,140 +1972,13 @@ export default function Home() {
                   <output>{feetInches(plateHeights[selected3DWall])}</output>
                 </button>
               )}
-            {selected3DEave !== null && (
-              <div className="wall-height-popover eave-assignment-popover">
-                <div className="wall-height-popover-heading">
-                  <div>
-                    <span className="view-label">SELECTED ROOF EDGE</span>
-                    <strong>{EDGE_LABELS[selected3DEave]} eave</strong>
-                  </div>
-                  <button
-                    aria-label="Close eave condition editor"
-                    onClick={() => setSelected3DEave(null)}
-                  >
-                    ×
-                  </button>
-                </div>
-                <label>
-                  <span>Wall / roof condition</span>
-                  <select
-                    value={edgeEaveIds[selected3DEave]}
-                    onChange={(event) =>
-                      assignEaveCondition(selected3DEave, event.target.value)
-                    }
-                  >
-                    {eaveCatalog.map((condition) => (
-                      <option key={condition.id} value={condition.id}>
-                        {condition.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <div className="condition-coordinate">
-                  <span>
-                    X {feetInches(bearingInsets[selected3DEave])} inboard
-                  </span>
-                  <span>
-                    Y +{feetInches(bearingOffsets[selected3DEave])} above plate
-                  </span>
-                </div>
-                <label>
-                  <span>Independent overhang</span>
-                  <div className="height-input">
-                    <input
-                      type="number"
-                      min={0}
-                      max={8}
-                      step={0.25}
-                      value={edgeOverhangs[selected3DEave]}
-                      onChange={(event) => {
-                        const nextValue = Number(event.target.value);
-                        if (!Number.isFinite(nextValue)) return;
-                        setEdgeOverhangs((current) =>
-                          current.map((overhang, index) =>
-                            index === selected3DEave
-                              ? Math.max(0, Math.min(8, nextValue))
-                              : overhang,
-                          ),
-                        );
-                      }}
-                    />
-                    <span>ft</span>
-                  </div>
-                </label>
-              </div>
-            )}
-            {showWalls && selected3DWall !== null && (
-              <div className="wall-height-popover">
-                <div className="wall-height-popover-heading">
-                  <div>
-                    <span className="view-label">SELECTED WALL</span>
-                    <strong>{EDGE_LABELS[selected3DWall]} wall</strong>
-                  </div>
-                  <button
-                    aria-label="Close wall height editor"
-                    onClick={() => setSelected3DWall(null)}
-                  >
-                    ×
-                  </button>
-                </div>
-                <label>
-                  <span>Top / plate height</span>
-                  <div className="height-input">
-                    <input
-                      autoFocus
-                      type="number"
-                      min={6}
-                      max={30}
-                      step={0.25}
-                      value={wallHeightDraft}
-                      onChange={(event) => {
-                        const nextDraft = event.target.value;
-                        setWallHeightDraft(nextDraft);
-                        const nextHeight = Number(nextDraft);
-                        if (
-                          selected3DWall === null ||
-                          !nextDraft.trim() ||
-                          !Number.isFinite(nextHeight) ||
-                          nextHeight < 6 ||
-                          nextHeight > 30
-                        ) {
-                          return;
-                        }
-                        setPlateHeights((current) =>
-                          current.map((height, index) =>
-                            index === selected3DWall ? nextHeight : height,
-                          ),
-                        );
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") {
-                          commitWallHeight();
-                          event.currentTarget.blur();
-                        }
-                        if (event.key === "Escape") {
-                          setWallHeightDraft(
-                            plateHeights[selected3DWall].toFixed(2),
-                          );
-                          setSelected3DWall(null);
-                        }
-                      }}
-                    />
-                    <span>ft</span>
-                  </div>
-                </label>
-                <small>
-                  Current {feetInches(plateHeights[selected3DWall])} · arrows
-                  update live
-                </small>
-              </div>
-            )}
             </ViewPanel>
           )}
         </section>
 
-        {selectedCatalogId && (
-          <aside className="detail-inspector">
+        <aside className="detail-inspector">
+          {selectedCatalogId ? (
+            <>
             <header className="detail-inspector-header">
               <div>
                 <span className="view-label">EAVE DETAIL CATALOG</span>
@@ -2337,8 +2151,185 @@ export default function Home() {
                 Save changes
               </button>
             </div>
-          </aside>
-        )}
+            </>
+          ) : selected3DWall !== null ? (
+            <>
+              <header className="detail-inspector-header">
+                <div>
+                  <span className="view-label">SELECTED WALL</span>
+                  <h2>{EDGE_LABELS[selected3DWall]} wall</h2>
+                </div>
+                <button
+                  aria-label="Clear wall selection"
+                  onClick={() => setSelected3DWall(null)}
+                >
+                  ×
+                </button>
+              </header>
+
+              <div className="inspector-selection-summary">
+                <span>{roleLabel(roles[selected3DWall])}</span>
+                <strong>{feetInches(plateHeights[selected3DWall])}</strong>
+              </div>
+
+              <div className="detail-form inspector-properties">
+                <label>
+                  <span>Top / plate height</span>
+                  <div className="height-input">
+                    <input
+                      type="number"
+                      min={6}
+                      max={30}
+                      step={0.25}
+                      value={wallHeightDraft}
+                      onChange={(event) => {
+                        const nextDraft = event.target.value;
+                        setWallHeightDraft(nextDraft);
+                        const nextHeight = Number(nextDraft);
+                        if (
+                          !nextDraft.trim() ||
+                          !Number.isFinite(nextHeight) ||
+                          nextHeight < 6 ||
+                          nextHeight > 30
+                        ) {
+                          return;
+                        }
+                        setPlateHeights((current) =>
+                          current.map((height, index) =>
+                            index === selected3DWall ? nextHeight : height,
+                          ),
+                        );
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          commitWallHeight();
+                          event.currentTarget.blur();
+                        }
+                        if (event.key === "Escape") {
+                          setWallHeightDraft(
+                            plateHeights[selected3DWall].toFixed(2),
+                          );
+                        }
+                      }}
+                    />
+                    <span>ft</span>
+                  </div>
+                </label>
+              </div>
+
+              <div className="detail-inspector-note">
+                Arrow controls and typed values update the wall live. Drag the
+                handle in 3D for direct height editing.
+              </div>
+
+              <dl className="inspector-data">
+                <div>
+                  <dt>Roof relationship</dt>
+                  <dd>{roleLabel(roles[selected3DWall])}</dd>
+                </div>
+                <div>
+                  <dt>Assigned condition</dt>
+                  <dd>
+                    {eaveCatalog.find(
+                      (condition) =>
+                        condition.id === edgeEaveIds[selected3DWall],
+                    )?.name ?? "Unassigned"}
+                  </dd>
+                </div>
+              </dl>
+            </>
+          ) : selected3DEave !== null ? (
+            <>
+              <header className="detail-inspector-header">
+                <div>
+                  <span className="view-label">SELECTED ROOF EDGE</span>
+                  <h2>{EDGE_LABELS[selected3DEave]} eave</h2>
+                </div>
+                <button
+                  aria-label="Clear roof edge selection"
+                  onClick={() => setSelected3DEave(null)}
+                >
+                  ×
+                </button>
+              </header>
+
+              <div className="inspector-selection-summary">
+                <span>{roleLabel(roles[selected3DEave])}</span>
+                <strong>E{selected3DEave + 1}</strong>
+              </div>
+
+              <div className="detail-form inspector-properties">
+                <label>
+                  <span>Wall / roof condition</span>
+                  <select
+                    value={edgeEaveIds[selected3DEave]}
+                    onChange={(event) =>
+                      assignEaveCondition(selected3DEave, event.target.value)
+                    }
+                  >
+                    {eaveCatalog.map((condition) => (
+                      <option key={condition.id} value={condition.id}>
+                        {condition.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <div className="condition-coordinate">
+                  <span>
+                    X {feetInches(bearingInsets[selected3DEave])} inboard
+                  </span>
+                  <span>
+                    Y +{feetInches(bearingOffsets[selected3DEave])} above plate
+                  </span>
+                </div>
+
+                <label>
+                  <span>Independent overhang</span>
+                  <div className="height-input">
+                    <input
+                      type="number"
+                      min={0}
+                      max={8}
+                      step={0.25}
+                      value={edgeOverhangs[selected3DEave]}
+                      onChange={(event) => {
+                        const nextValue = Number(event.target.value);
+                        if (!Number.isFinite(nextValue)) return;
+                        setEdgeOverhangs((current) =>
+                          current.map((overhang, index) =>
+                            index === selected3DEave
+                              ? Math.max(0, Math.min(8, nextValue))
+                              : overhang,
+                          ),
+                        );
+                      }}
+                    />
+                    <span>ft</span>
+                  </div>
+                </label>
+              </div>
+
+              <div className="detail-inspector-note">
+                The condition controls the stable X/Y roof locator. Overhang
+                extends beyond it independently.
+              </div>
+            </>
+          ) : (
+            <div className="inspector-empty">
+              <span className="view-label">INSPECTOR</span>
+              <div className="inspector-empty-glyph" aria-hidden="true">
+                <i />
+                <b />
+              </div>
+              <h2>Nothing selected</h2>
+              <p>
+                Select a wall, roof edge, or eave detail to inspect and edit
+                its properties.
+              </p>
+            </div>
+          )}
+        </aside>
       </div>
 
       <footer className="statusbar">
