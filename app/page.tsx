@@ -2002,7 +2002,25 @@ export default function Home() {
                       max={30}
                       step={0.25}
                       value={wallHeightDraft}
-                      onChange={(event) => setWallHeightDraft(event.target.value)}
+                      onChange={(event) => {
+                        const nextDraft = event.target.value;
+                        setWallHeightDraft(nextDraft);
+                        const nextHeight = Number(nextDraft);
+                        if (
+                          selected3DWall === null ||
+                          !nextDraft.trim() ||
+                          !Number.isFinite(nextHeight) ||
+                          nextHeight < 6 ||
+                          nextHeight > 30
+                        ) {
+                          return;
+                        }
+                        setPlateHeights((current) =>
+                          current.map((height, index) =>
+                            index === selected3DWall ? nextHeight : height,
+                          ),
+                        );
+                      }}
                       onKeyDown={(event) => {
                         if (event.key === "Enter") {
                           commitWallHeight();
@@ -2020,8 +2038,8 @@ export default function Home() {
                   </div>
                 </label>
                 <small>
-                  Current {feetInches(plateHeights[selected3DWall])} · Enter to
-                  apply
+                  Current {feetInches(plateHeights[selected3DWall])} · arrows
+                  update live
                 </small>
               </div>
             )}
