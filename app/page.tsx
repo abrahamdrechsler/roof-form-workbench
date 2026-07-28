@@ -119,6 +119,109 @@ function solveGable(
   };
 }
 
+type PlanPoint = { x: number; z: number };
+type RoofPlaneDefinition = {
+  id: string;
+  label: string;
+  color: string;
+  a: number;
+  b: number;
+  c: number;
+};
+
+function makeHipPlaneDefinitions(
+  halfWidth: number,
+  halfDepth: number,
+  bearingElevations: number[],
+  pitch: number,
+): RoofPlaneDefinition[] {
+  const slope = Math.max(pitch / 12, 0.001);
+  return [
+    {
+      id: "north-hip",
+      label: "North hip plane",
+      color: "#e78a4e",
+      a: 0,
+      b: slope,
+      c: bearingElevations[0] + slope * halfDepth,
+    },
+    {
+      id: "east-plane",
+      label: "East roof plane",
+      color: "#ef9e67",
+      a: -slope,
+      b: 0,
+      c: bearingElevations[1] + slope * halfWidth,
+    },
+    {
+      id: "south-hip",
+      label: "South hip plane",
+      color: "#f2ae7e",
+      a: 0,
+      b: -slope,
+      c: bearingElevations[2] + slope * halfDepth,
+    },
+    {
+      id: "west-plane",
+      label: "West roof plane",
+      color: "#d97834",
+      a: slope,
+      b: 0,
+      c: bearingElevations[3] + slope * halfWidth,
+    },
+  ];
+}
+
+function evaluatePlane(plane: RoofPlaneDefinition, point: PlanPoint) {
+  return plane.a * point.x + plane.b * point.z + plane.c;
+}
+
+function clipPlanPolygon(
+  polygon: PlanPoint[],
+  a: number,
+  b: number,
+  c: number,
+) {
+  const result: PlanPoint[] = [];
+  if (polygon.length === 0) return result;
+  polygon.forEach((current, index) => {
+    const previous = polygon[(index + polygon.length - 1) % polygon.length];
+    const previousValue = a * previous.x + b * previous.z + c;
+    const currentValue = a * current.x + b * current.z + c;
+    const previousInside = previousValue <= 0.0001;
+    const currentInside = currentValue <= 0.0001;
+
+    if (previousInside !== currentInside) {
+      const t = previousValue / (previousValue - currentValue);
+      result.push({
+        x: previous.x + (current.x - previous.x) * t,
+        z: previous.z + (current.z - previous.z) * t,
+      });
+    }
+    if (currentInside) result.push(current);
+  });
+  return result;
+}
+
+function hipRoofHeight(
+  x: number,
+  z: number,
+  halfWidth: number,
+  halfDepth: number,
+  bearingElevations: number[],
+  pitch: number,
+) {
+  const point = { x, z };
+  return Math.min(
+    ...makeHipPlaneDefinitions(
+      halfWidth,
+      halfDepth,
+      bearingElevations,
+      pitch,
+    ).map((plane) => evaluatePlane(plane, point)),
+  );
+}
+
 function makeRoofFaces(
   kind: RoofKind,
   buildingWidth: number,
@@ -130,9 +233,7 @@ function makeRoofFaces(
   if (!roofResolved) return [];
   const w = buildingWidth / 2;
   const d = buildingDepth / 2;
-  const northBase = bearingElevations[0];
   const eastBase = bearingElevations[1];
-  const southBase = bearingElevations[2];
   const westBase = bearingElevations[3];
   const gable = solveGable(
     buildingWidth,
@@ -170,53 +271,41 @@ function makeRoofFaces(
   }
 
   if (kind === "hip") {
-    const base = northBase;
-    const ridge = base + w * (pitch / 12);
-    const ridgeEnd = Math.max(0, d - w);
-    faces.push(
-      {
-        id: "west-plane",
-        label: "West roof plane",
-        color: "#d97834",
-        points: [
-          { x: -w, y: base, z: -d },
-          { x: -w, y: base, z: d },
-          { x: 0, y: ridge, z: ridgeEnd },
-          { x: 0, y: ridge, z: -ridgeEnd },
-        ],
-      },
-      {
-        id: "east-plane",
-        label: "East roof plane",
-        color: "#ef9e67",
-        points: [
-          { x: w, y: base, z: -d },
-          { x: 0, y: ridge, z: -ridgeEnd },
-          { x: 0, y: ridge, z: ridgeEnd },
-          { x: w, y: base, z: d },
-        ],
-      },
-      {
-        id: "north-hip",
-        label: "North hip plane",
-        color: "#e78a4e",
-        points: [
-          { x: -w, y: base, z: -d },
-          { x: 0, y: ridge, z: -ridgeEnd },
-          { x: w, y: base, z: -d },
-        ],
-      },
-      {
-        id: "south-hip",
-        label: "South hip plane",
-        color: "#f2ae7e",
-        points: [
-          { x: -w, y: base, z: d },
-          { x: w, y: base, z: d },
-          { x: 0, y: ridge, z: ridgeEnd },
-        ],
-      },
+    const rectangle: PlanPoint[] = [
+      { x: -w, z: -d },
+      { x: w, z: -d },
+      { x: w, z: d },
+      { x: -w, z: d },
+    ];
+    const planes = makeHipPlaneDefinitions(
+      w,
+      d,
+      bearingElevations,
+      pitch,
     );
+    planes.forEach((plane, planeIndex) => {
+      let region = rectangle;
+      planes.forEach((other, otherIndex) => {
+        if (planeIndex === otherIndex) return;
+        region = clipPlanPolygon(
+          region,
+          plane.a - other.a,
+          plane.b - other.b,
+          plane.c - other.c,
+        );
+      });
+      if (region.length < 3) return;
+      faces.push({
+        id: plane.id,
+        label: plane.label,
+        color: plane.color,
+        points: region.map((point) => ({
+          x: point.x,
+          y: evaluatePlane(plane, point),
+          z: point.z,
+        })),
+      });
+    });
   }
 
   if (kind === "shed") {
@@ -281,15 +370,16 @@ export default function Home() {
   );
   const hipBearingSpread =
     Math.max(...bearingElevations) - Math.min(...bearingElevations);
-  const hipVariableConflict = roofKind === "hip" && hipBearingSpread > 0.01;
+  const hipVariableTransition =
+    roofKind === "hip" && hipBearingSpread > 0.01;
   const roofResolved =
-    roofKind === "hip" ? !hipVariableConflict : gableSolution.resolved;
+    roofKind === "hip" ? true : gableSolution.resolved;
   const ridgeElevation =
     roofKind === "shed"
       ? Math.max(bearingElevations[1], bearingElevations[3])
       : roofKind === "gable"
         ? gableSolution.ridgeElevation
-        : bearingElevations[0] +
+        : Math.max(...bearingElevations) +
           (buildingWidth / 2) * (pitch / 12);
   const selectedRole = roles[selectedEdge];
   const selectedDrivesRoof =
@@ -435,15 +525,24 @@ export default function Home() {
       context.moveTo(ridgePlanX, top);
       context.lineTo(ridgePlanX, bottom);
     } else if (roofKind === "hip") {
-      const inset = Math.min(rectWidth / 2, rectHeight / 2);
-      context.moveTo(left, top);
-      context.lineTo((left + right) / 2, top + inset);
-      context.lineTo((left + right) / 2, bottom - inset);
-      context.lineTo(right, bottom);
-      context.moveTo(right, top);
-      context.lineTo((left + right) / 2, top + inset);
-      context.moveTo(left, bottom);
-      context.lineTo((left + right) / 2, bottom - inset);
+      makeRoofFaces(
+        roofKind,
+        buildingWidth,
+        buildingDepth,
+        bearingElevations,
+        effectivePitch,
+        true,
+      ).forEach((face) => {
+        const points = face.points.map((point) => ({
+          x: left + ((point.x + buildingWidth / 2) / buildingWidth) * rectWidth,
+          y: top + ((point.z + buildingDepth / 2) / buildingDepth) * rectHeight,
+        }));
+        context.beginPath();
+        context.moveTo(points[0].x, points[0].y);
+        points.slice(1).forEach((point) => context.lineTo(point.x, point.y));
+        context.closePath();
+        context.stroke();
+      });
     } else {
       context.moveTo(left + rectWidth * 0.25, middle);
       context.lineTo(right - rectWidth * 0.2, middle);
@@ -466,6 +565,8 @@ export default function Home() {
   }, [
     buildingDepth,
     buildingWidth,
+    bearingElevations,
+    effectivePitch,
     gableSolution.ridgeX,
     plateHeights,
     roofKind,
@@ -780,8 +881,21 @@ export default function Home() {
         );
         context.lineTo(x(buildingWidth / 2), y(eastBase));
       } else {
-        context.lineTo(width / 2, y(ridgeElevation));
-        context.lineTo(x(buildingWidth / 2), y(eastBase));
+        context.beginPath();
+        for (let index = 0; index <= 80; index += 1) {
+          const sectionX =
+            -buildingWidth / 2 + (index / 80) * buildingWidth;
+          const sectionY = hipRoofHeight(
+            sectionX,
+            0,
+            buildingWidth / 2,
+            buildingDepth / 2,
+            bearingElevations,
+            effectivePitch,
+          );
+          if (index === 0) context.moveTo(x(sectionX), y(sectionY));
+          else context.lineTo(x(sectionX), y(sectionY));
+        }
       }
       context.stroke();
     } else {
@@ -805,6 +919,7 @@ export default function Home() {
     context.fillText(`${effectivePitch.toFixed(1)}:12`, width - 68, 20);
   }, [
     bearingElevations,
+    buildingDepth,
     buildingWidth,
     effectivePitch,
     gableSolution.ridgeElevation,
@@ -1104,9 +1219,17 @@ export default function Home() {
               </div>
               <div>
                 <dt>Relationship</dt>
-                <dd className={!roofResolved ? "warning" : "healthy"}>
+                <dd
+                  className={
+                    !roofResolved || hipVariableTransition
+                      ? "warning"
+                      : "healthy"
+                  }
+                >
                   {!roofResolved
                     ? "Contradictory supports"
+                    : hipVariableTransition
+                      ? "Driving · corners adjust"
                     : selectedDrivesRoof
                       ? "Driving roof"
                       : "Clipped by roof"}
@@ -1146,9 +1269,17 @@ export default function Home() {
 
       <footer className="statusbar">
         <span>
-          <i className={!roofResolved ? "warning-dot" : "healthy-dot"} />
+          <i
+            className={
+              !roofResolved || hipVariableTransition
+                ? "warning-dot"
+                : "healthy-dot"
+            }
+          />
           {!roofResolved
             ? "No roof solid: bearing-base elevations are contradictory"
+            : hipVariableTransition
+              ? "Roof planes regenerated; corner transitions are provisional"
             : "Wall tops, bearing rails, section, and 3D form agree"}
         </span>
         <span>
