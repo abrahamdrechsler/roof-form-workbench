@@ -904,14 +904,52 @@ export default function Home() {
       const cornerElevations = roofPoints.map((_, index) => {
         const previousEdge =
           (index + roofPoints.length - 1) % roofPoints.length;
-        return (
-          (edgeElevation(previousEdge) + edgeElevation(index)) / 2
+        return Math.min(
+          edgeElevation(previousEdge),
+          edgeElevation(index),
         );
       });
-      const faces = roofEdges.map((edge) => {
-        const startY = cornerElevations[edge.index];
-        const endY =
-          cornerElevations[(edge.index + 1) % cornerElevations.length];
+      const edgeProfiles = roofEdges.map((edge) => {
+        const length = segmentLength(edge.start, edge.end);
+        const transitionRun = Math.min(4, length * 0.25);
+        const transitionFraction =
+          length > 0 ? transitionRun / length : 0;
+        const pointAlongEdge = (amount: number) => ({
+          x: edge.start.x + (edge.end.x - edge.start.x) * amount,
+          z: edge.start.z + (edge.end.z - edge.start.z) * amount,
+        });
+        const plateauStart = pointAlongEdge(transitionFraction);
+        const plateauEnd = pointAlongEdge(1 - transitionFraction);
+        return {
+          edge,
+          points: [
+            {
+              x: edge.start.x,
+              y: cornerElevations[edge.index],
+              z: edge.start.z,
+            },
+            {
+              x: plateauStart.x,
+              y: edgeElevation(edge.index),
+              z: plateauStart.z,
+            },
+            {
+              x: plateauEnd.x,
+              y: edgeElevation(edge.index),
+              z: plateauEnd.z,
+            },
+            {
+              x: edge.end.x,
+              y:
+                cornerElevations[
+                  (edge.index + 1) % cornerElevations.length
+                ],
+              z: edge.end.z,
+            },
+          ],
+        };
+      });
+      const faces = edgeProfiles.map(({ edge, points }) => {
         const edgeMidpoint = midpoint(edge.start, edge.end);
         let target = peak;
         if (roofKind === "gable") {
@@ -927,16 +965,7 @@ export default function Home() {
         }
         return {
           index: edge.index,
-          points: [
-            { x: edge.start.x, y: startY, z: edge.start.z },
-            {
-              x: edgeMidpoint.x,
-              y: edgeElevation(edge.index),
-              z: edgeMidpoint.z,
-            },
-            { x: edge.end.x, y: endY, z: edge.end.z },
-            target,
-          ],
+          points: [...points, target],
         };
       });
       faces
@@ -985,30 +1014,11 @@ export default function Home() {
         context.stroke();
       }
 
-      roofEdges.forEach((edge) => {
-        const eaveElevation = edgeElevation(edge.index);
-        const start = project({
-          x: edge.start.x,
-          y: cornerElevations[edge.index],
-          z: edge.start.z,
-        });
-        const edgeMidpoint = midpoint(edge.start, edge.end);
-        const middle = project({
-          x: edgeMidpoint.x,
-          y: eaveElevation,
-          z: edgeMidpoint.z,
-        });
-        const end = project({
-          x: edge.end.x,
-          y:
-            cornerElevations[
-              (edge.index + 1) % cornerElevations.length
-            ],
-          z: edge.end.z,
-        });
+      edgeProfiles.forEach(({ edge, points }) => {
+        const projectedProfile = points.map(project);
         formEaveRegions.current.push({
           index: edge.index,
-          points: [start, middle, end],
+          points: projectedProfile,
         });
         const selectedEdge =
           selection?.kind === "roof-edge" && selection.index === edge.index;
@@ -1016,10 +1026,15 @@ export default function Home() {
         context.lineWidth = selectedEdge ? 4 : 2;
         context.lineCap = "round";
         context.beginPath();
-        context.moveTo(start.x, start.y);
-        context.lineTo(middle.x, middle.y);
-        context.lineTo(end.x, end.y);
+        context.moveTo(projectedProfile[0].x, projectedProfile[0].y);
+        projectedProfile.slice(1).forEach((point) => {
+          context.lineTo(point.x, point.y);
+        });
         context.stroke();
+        const middle = {
+          x: (projectedProfile[1].x + projectedProfile[2].x) / 2,
+          y: (projectedProfile[1].y + projectedProfile[2].y) / 2,
+        };
         context.beginPath();
         context.arc(
           middle.x,
@@ -1951,7 +1966,8 @@ export default function Home() {
               </div>
               <div className="detail-inspector-note">
                 This eave is independently positioned from the fixed roof base.
-                Adjacent corner transitions remain provisional.
+                Its center run stays horizontal while the ends slope to shared
+                corner elevations.
               </div>
               <dl className="inspector-data">
                 <div>
