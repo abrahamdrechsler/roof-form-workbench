@@ -17,12 +17,12 @@ type EaveCondition = {
   inset: number;
 };
 type EdgeRelationship = {
-  wallIndex: number | null;
   conditionId: string;
   overhang: number;
 };
 type Selection =
   | { kind: "wall"; index: number }
+  | { kind: "roof" }
   | { kind: "roof-edge"; index: number }
   | { kind: "catalog"; id: string }
   | null;
@@ -191,18 +191,25 @@ function roofSegments(points: Point2[], closed: boolean) {
   }));
 }
 
-function nearestWallIndex(point: Point2, points: Point2[], closed: boolean) {
-  const segments = wallSegments(points, closed);
-  if (!segments.length) return null;
-  return segments.reduce(
-    (nearest, segment) => {
-      const distance = pointToSegmentDistance(point, segment.start, segment.end);
-      return distance < nearest.distance
-        ? { index: segment.index, distance }
-        : nearest;
-    },
-    { index: segments[0].index, distance: Number.POSITIVE_INFINITY },
-  ).index;
+function pointInPlanPolygon(point: Point2, polygon: Point2[]) {
+  let inside = false;
+  for (
+    let index = 0, previous = polygon.length - 1;
+    index < polygon.length;
+    previous = index, index += 1
+  ) {
+    const currentPoint = polygon[index];
+    const previousPoint = polygon[previous];
+    const crosses =
+      currentPoint.z > point.z !== previousPoint.z > point.z &&
+      point.x <
+        ((previousPoint.x - currentPoint.x) *
+          (point.z - currentPoint.z)) /
+          (previousPoint.z - currentPoint.z) +
+          currentPoint.x;
+    if (crosses) inside = !inside;
+  }
+  return inside;
 }
 
 function modelCenter(walls: Point2[], roof: Point2[]) {
@@ -223,6 +230,7 @@ export default function Home() {
   const [roofClosed, setRoofClosed] = useState(true);
   const [wallHeights, setWallHeights] = useState([9, 9, 9, 9]);
   const [roofBase, setRoofBase] = useState(10);
+  const [clipWalls, setClipWalls] = useState(false);
   const [pitch, setPitch] = useState(6);
   const [roofKind, setRoofKind] = useState<RoofKind>("hip");
   const [selection, setSelection] = useState<Selection>(null);
@@ -238,8 +246,7 @@ export default function Home() {
     INITIAL_EAVE_CONDITIONS,
   );
   const [relationships, setRelationships] = useState<EdgeRelationship[]>(
-    INITIAL_ROOF_POINTS.map((_, index) => ({
-      wallIndex: index,
+    INITIAL_ROOF_POINTS.map(() => ({
       conditionId: "rafter-seat",
       overhang: 1.5,
     })),
@@ -267,6 +274,7 @@ export default function Home() {
   const formEaveRegions = useRef<
     { index: number; start: ScreenPoint; end: ScreenPoint }[]
   >([]);
+  const formRoofRegions = useRef<ScreenPoint[][]>([]);
   const orbitDrag = useRef<{
     pointerId: number;
     x: number;
@@ -293,28 +301,7 @@ export default function Home() {
     [eaveCatalog, relationships],
   );
 
-  const edgeBaseElevation = useCallback(
-    (index: number) => {
-      const relationship = relationships[index];
-      if (!relationship || relationship.wallIndex === null) return roofBase;
-      const condition = conditionForEdge(index);
-      const plate = wallHeights[relationship.wallIndex] ?? 9;
-      return (
-        plate +
-        (condition?.height ?? 0) -
-        (condition?.inset ?? 0) * (pitch / 12)
-      );
-    },
-    [conditionForEdge, pitch, relationships, roofBase, wallHeights],
-  );
-
-  const vertexBaseElevations = roofPoints.map((_, index) => {
-    if (!roofClosed || roofPoints.length < 3) return roofBase;
-    const previous = edgeBaseElevation(
-      (index + roofPoints.length - 1) % roofPoints.length,
-    );
-    return (previous + edgeBaseElevation(index)) / 2;
-  });
+  const vertexBaseElevations = roofPoints.map(() => roofBase);
 
   const startCommand = (nextCommand: DrawCommand) => {
     setCommand(nextCommand);
@@ -351,17 +338,10 @@ export default function Home() {
 
   const closeRoof = () => {
     if (roofPoints.length < 3) return;
-    const nextRelationships = roofPoints.map((point, index) => {
-      const edgeMidpoint = midpoint(
-        point,
-        roofPoints[(index + 1) % roofPoints.length],
-      );
-      return {
-        wallIndex: nearestWallIndex(edgeMidpoint, wallPoints, wallsClosed),
-        conditionId: eaveCatalog[0]?.id ?? "",
-        overhang: 1.5,
-      };
-    });
+    const nextRelationships = roofPoints.map(() => ({
+      conditionId: eaveCatalog[0]?.id ?? "",
+      overhang: 1.5,
+    }));
     setRelationships(nextRelationships);
     setRoofClosed(true);
     setCommand("select");
@@ -375,11 +355,11 @@ export default function Home() {
     setRoofClosed(true);
     setWallHeights([9, 9, 9, 9]);
     setRoofBase(10);
+    setClipWalls(false);
     setPitch(6);
     setRoofKind("hip");
     setRelationships(
-      INITIAL_ROOF_POINTS.map((_, index) => ({
-        wallIndex: index,
+      INITIAL_ROOF_POINTS.map(() => ({
         conditionId: "rafter-seat",
         overhang: 1.5,
       })),
@@ -517,9 +497,13 @@ export default function Home() {
       drawPolygon(
         context,
         roofPoints.map(project),
-        "rgba(217, 119, 53, 0.07)",
-        "rgba(217, 119, 53, 0.25)",
-        1,
+        selection?.kind === "roof"
+          ? "rgba(22, 131, 138, 0.10)"
+          : "rgba(217, 119, 53, 0.07)",
+        selection?.kind === "roof"
+          ? "rgba(22, 131, 138, 0.65)"
+          : "rgba(217, 119, 53, 0.25)",
+        selection?.kind === "roof" ? 2 : 1,
       );
     }
 
@@ -736,6 +720,59 @@ export default function Home() {
       context.stroke();
     }
 
+    const roofBounds = roofPoints.reduce(
+      (result, point) => ({
+        minX: Math.min(result.minX, point.x),
+        maxX: Math.max(result.maxX, point.x),
+        minZ: Math.min(result.minZ, point.z),
+        maxZ: Math.max(result.maxZ, point.z),
+      }),
+      {
+        minX: Number.POSITIVE_INFINITY,
+        maxX: Number.NEGATIVE_INFINITY,
+        minZ: Number.POSITIVE_INFINITY,
+        maxZ: Number.NEGATIVE_INFINITY,
+      },
+    );
+    const dominantRoofAxisIsX =
+      roofBounds.maxX - roofBounds.minX >=
+      roofBounds.maxZ - roofBounds.minZ;
+    const roofSurfaceAt = (point: Point2) => {
+      if (
+        !roofClosed ||
+        roofPoints.length < 3 ||
+        (!pointInPlanPolygon(point, roofPoints) &&
+          !roofEdges.some(
+            (edge) =>
+              pointToSegmentDistance(point, edge.start, edge.end) < 0.01,
+          ))
+      ) {
+        return null;
+      }
+      const slope = pitch / 12;
+      if (roofKind === "shed") {
+        return roofBase + (point.x - roofBounds.minX) * slope;
+      }
+      if (roofKind === "gable") {
+        const run = dominantRoofAxisIsX
+          ? Math.min(
+              point.z - roofBounds.minZ,
+              roofBounds.maxZ - point.z,
+            )
+          : Math.min(
+              point.x - roofBounds.minX,
+              roofBounds.maxX - point.x,
+            );
+        return roofBase + Math.max(0, run) * slope;
+      }
+      const run = Math.min(
+        ...roofEdges.map((edge) =>
+          pointToSegmentDistance(point, edge.start, edge.end),
+        ),
+      );
+      return roofBase + Math.max(0, run) * slope;
+    };
+
     formWallRegions.current = [];
     if (showWalls) {
       const orderedWalls = [...walls].sort((a, b) => {
@@ -751,11 +788,24 @@ export default function Home() {
       });
       orderedWalls.forEach((wall) => {
         const height = wallHeights[wall.index] ?? 9;
+        const topPoints: Point3[] = [];
+        for (let sample = 12; sample >= 0; sample -= 1) {
+          const amount = sample / 12;
+          const point = {
+            x: wall.start.x + (wall.end.x - wall.start.x) * amount,
+            z: wall.start.z + (wall.end.z - wall.start.z) * amount,
+          };
+          const roofHeight = clipWalls ? roofSurfaceAt(point) : null;
+          topPoints.push({
+            x: point.x,
+            y: roofHeight === null ? height : Math.min(height, roofHeight),
+            z: point.z,
+          });
+        }
         const face = [
           { x: wall.start.x, y: 0, z: wall.start.z },
           { x: wall.end.x, y: 0, z: wall.end.z },
-          { x: wall.end.x, y: height, z: wall.end.z },
-          { x: wall.start.x, y: height, z: wall.start.z },
+          ...topPoints,
         ];
         const projected = face.map(project);
         formWallRegions.current.push({ index: wall.index, points: projected });
@@ -793,6 +843,7 @@ export default function Home() {
     }
 
     formEaveRegions.current = [];
+    formRoofRegions.current = [];
     if (roofClosed && roofPoints.length >= 3) {
       const averageRadius =
         roofPoints.reduce(
@@ -802,21 +853,8 @@ export default function Home() {
         ) / roofPoints.length;
       const highestBase = Math.max(...vertexBaseElevations, roofBase);
       const rise = Math.max(2, averageRadius * (pitch / 12));
-      const bounds = roofPoints.reduce(
-        (result, point) => ({
-          minX: Math.min(result.minX, point.x),
-          maxX: Math.max(result.maxX, point.x),
-          minZ: Math.min(result.minZ, point.z),
-          maxZ: Math.max(result.maxZ, point.z),
-        }),
-        {
-          minX: Number.POSITIVE_INFINITY,
-          maxX: Number.NEGATIVE_INFINITY,
-          minZ: Number.POSITIVE_INFINITY,
-          maxZ: Number.NEGATIVE_INFINITY,
-        },
-      );
-      const dominantX = bounds.maxX - bounds.minX >= bounds.maxZ - bounds.minZ;
+      const bounds = roofBounds;
+      const dominantX = dominantRoofAxisIsX;
       const ridgeA: Point3 = dominantX
         ? {
             x: bounds.minX + (bounds.maxX - bounds.minX) * 0.28,
@@ -891,11 +929,17 @@ export default function Home() {
           const selectedEdge =
             selection?.kind === "roof-edge" &&
             selection.index === face.index;
+          const projectedFace = face.points.map(project);
+          formRoofRegions.current.push(projectedFace);
           drawPolygon(
             context,
-            face.points.map(project),
+            projectedFace,
             selectedEdge
               ? "#d97834"
+              : selection?.kind === "roof"
+                ? order % 2
+                  ? "#e89a65"
+                  : "#d97f45"
               : order % 2
                 ? "#ef9e67"
                 : "#df8347",
@@ -945,7 +989,7 @@ export default function Home() {
         context.fillStyle = "#126a70";
         context.font = "600 8px monospace";
         context.fillText(
-          `DEFAULT ROOF BASE · ${feetInches(roofBase)}`,
+          `FIXED ROOF BASE · ${feetInches(roofBase)}`,
           16,
           24,
         );
@@ -958,6 +1002,7 @@ export default function Home() {
   }, [
     center.x,
     center.z,
+    clipWalls,
     orbit,
     pitch,
     roofBase,
@@ -1063,6 +1108,8 @@ export default function Home() {
       setWallHeightDraft((wallHeights[wallHit.index] ?? 9).toFixed(2));
     } else if (roofHit && roofHit.distance <= 1) {
       setSelection({ kind: "roof-edge", index: roofHit.index });
+    } else if (roofClosed && pointInPlanPolygon(point, roofPoints)) {
+      setSelection({ kind: "roof" });
     } else {
       setSelection(null);
     }
@@ -1207,7 +1254,7 @@ export default function Home() {
               ))}
             </div>
             <Range
-              label="Default roof base"
+              label="Roof base elevation"
               value={roofBase}
               min={4}
               max={30}
@@ -1224,12 +1271,17 @@ export default function Home() {
               output={`${pitch.toFixed(1)}:12`}
               onChange={setPitch}
             />
+            <Check
+              label="Clip walls at roof surface"
+              value={clipWalls}
+              onChange={setClipWalls}
+            />
           </div>
 
           <div className="control-section catalog-section">
             <ControlHeading number="03" title="Eave detail catalog" />
             <p className="catalog-copy">
-              Stable wall-to-roof locators assigned per roof edge.
+              Edge details are stored without moving the roof base datum.
             </p>
             <div className="eave-catalog-list">
               {eaveCatalog.map((condition) => (
@@ -1431,6 +1483,13 @@ export default function Home() {
                     );
                     return;
                   }
+                  const roof = [...formRoofRegions.current]
+                    .reverse()
+                    .find((region) => pointInPolygon(pointer, region));
+                  if (roof) {
+                    setSelection({ kind: "roof" });
+                    return;
+                  }
                   setSelection(null);
                 }}
                 onPointerDown={(event) => {
@@ -1583,22 +1642,74 @@ export default function Home() {
                 </label>
               </div>
               <div className="detail-inspector-note">
-                This segment is independent. Roof edges assigned to it follow
-                this plate height through their eave detail.
+                This plate height is independently authored. Changing it never
+                repositions the roof.
               </div>
               <dl className="inspector-data">
                 <div>
-                  <dt>Roof edges following this wall</dt>
-                  <dd>
-                    {relationships
-                      .map((relationship, index) =>
-                        relationship.wallIndex === selection.index
-                          ? `E${index + 1}`
-                          : null,
-                      )
-                      .filter(Boolean)
-                      .join(", ") || "None"}
-                  </dd>
+                  <dt>Roof clipping</dt>
+                  <dd>{clipWalls ? "Displayed wall clips at roof" : "Off"}</dd>
+                </div>
+              </dl>
+            </>
+          ) : selection?.kind === "roof" ? (
+            <>
+              <InspectorHeader
+                label="SELECTED ROOF"
+                title="Roof volume"
+                onClose={() => setSelection(null)}
+              />
+              <div className="inspector-selection-summary">
+                <span>Independent authored object</span>
+                <strong>{ROOF_FORMS[roofKind].label}</strong>
+              </div>
+              <div className="detail-form inspector-properties">
+                <label>
+                  <span>Roof base elevation</span>
+                  <div className="height-input">
+                    <input
+                      type="number"
+                      min={4}
+                      max={30}
+                      step={0.25}
+                      value={roofBase}
+                      onChange={(event) => {
+                        const value = Number(event.target.value);
+                        if (Number.isFinite(value)) {
+                          setRoofBase(Math.max(4, Math.min(30, value)));
+                        }
+                      }}
+                    />
+                    <span>ft</span>
+                  </div>
+                </label>
+                <label className="inspector-toggle">
+                  <span>
+                    <strong>Clip walls at roof</strong>
+                    <small>
+                      Trim displayed wall geometry without changing plate
+                      heights.
+                    </small>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={clipWalls}
+                    onChange={(event) => setClipWalls(event.target.checked)}
+                  />
+                </label>
+              </div>
+              <div className="detail-inspector-note">
+                The roof always starts from this fixed base elevation. Wall
+                height changes do not move it.
+              </div>
+              <dl className="inspector-data">
+                <div>
+                  <dt>Boundary</dt>
+                  <dd>{roofEdges.length} closed edges</dd>
+                </div>
+                <div>
+                  <dt>Pitch</dt>
+                  <dd>{pitch.toFixed(1)}:12</dd>
                 </div>
               </dl>
             </>
@@ -1621,28 +1732,6 @@ export default function Home() {
                 </strong>
               </div>
               <div className="detail-form inspector-properties">
-                <label>
-                  <span>Vertical relationship</span>
-                  <select
-                    value={relationships[selection.index]?.wallIndex ?? ""}
-                    onChange={(event) =>
-                      updateRelationship(selection.index, {
-                        wallIndex:
-                          event.target.value === ""
-                            ? null
-                            : Number(event.target.value),
-                      })
-                    }
-                  >
-                    <option value="">Use roof base datum</option>
-                    {walls.map((wall) => (
-                      <option key={wall.index} value={wall.index}>
-                        Follow wall {wall.index + 1} ·{" "}
-                        {feetInches(wallHeights[wall.index] ?? 9)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
                 <label>
                   <span>Eave condition</span>
                   <select
@@ -1694,14 +1783,18 @@ export default function Home() {
                   </div>
                 </label>
               </div>
+              <div className="detail-inspector-note">
+                Edge details and overhang are independent of the fixed roof base.
+                Wall heights do not drive this edge.
+              </div>
               <dl className="inspector-data">
                 <div>
-                  <dt>Resolved eave elevation</dt>
-                  <dd>{feetInches(edgeBaseElevation(selection.index))}</dd>
+                  <dt>Roof base elevation</dt>
+                  <dd>{feetInches(roofBase)}</dd>
                 </div>
                 <div>
-                  <dt>Corner behavior</dt>
-                  <dd>Blend adjacent edge elevations</dd>
+                  <dt>Wall influence</dt>
+                  <dd>None</dd>
                 </div>
               </dl>
             </>
@@ -1762,8 +1855,8 @@ export default function Home() {
                 </span>
               </div>
               <p className="detail-preview-caption">
-                This locator positions a roof edge relative to its assigned wall
-                plate. Overhang remains separate.
+                This detail remains edge metadata. It does not reposition the
+                roof’s fixed base elevation.
               </p>
               <div className="detail-form">
                 <label>
@@ -1856,8 +1949,8 @@ export default function Home() {
               </div>
               <h2>Walls and roof are independent</h2>
               <p>
-                Draw either path, then select a wall or roof edge to define how
-                they relate.
+                Draw either path, then select the roof, a wall, or an edge to
+                edit its independent properties.
               </p>
               <dl className="model-counts">
                 <div>
@@ -1869,14 +1962,8 @@ export default function Home() {
                   <dd>{roofEdges.length}</dd>
                 </div>
                 <div>
-                  <dt>Explicit relationships</dt>
-                  <dd>
-                    {
-                      relationships.filter(
-                        (relationship) => relationship.wallIndex !== null,
-                      ).length
-                    }
-                  </dd>
+                  <dt>Clip walls</dt>
+                  <dd>{clipWalls ? "On" : "Off"}</dd>
                 </div>
               </dl>
             </div>
@@ -1895,8 +1982,8 @@ export default function Home() {
           {walls.length} walls · {roofEdges.length} roof edges
         </span>
         <span>
-          {relationships.filter((relationship) => relationship.wallIndex !== null).length}{" "}
-          wall–eave relationships
+          Roof base {feetInches(roofBase)} · wall clipping{" "}
+          {clipWalls ? "on" : "off"}
         </span>
       </footer>
     </main>

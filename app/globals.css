@@ -1233,6 +1233,46 @@ canvas {
   margin-top: 0;
 }
 
+.inspector-toggle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 11px;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.inspector-toggle > span {
+  margin: 0;
+}
+
+.inspector-toggle strong,
+.inspector-toggle small {
+  display: block;
+}
+
+.inspector-toggle strong {
+  color: var(--ink);
+  font-size: 9px;
+}
+
+.inspector-toggle small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 400;
+  line-height: 1.35;
+}
+
+.inspector-toggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--teal);
+}
+
 .inspector-data {
   margin: 18px 0 0;
   padding: 0;
