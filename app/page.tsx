@@ -19,6 +19,7 @@ type EaveCondition = {
 type EdgeRelationship = {
   conditionId: string;
   overhang: number;
+  elevationOffset: number;
 };
 type Selection =
   | { kind: "wall"; index: number }
@@ -249,6 +250,7 @@ export default function Home() {
     INITIAL_ROOF_POINTS.map(() => ({
       conditionId: "rafter-seat",
       overhang: 1.5,
+      elevationOffset: 0,
     })),
   );
   const [catalogDraft, setCatalogDraft] = useState({
@@ -301,7 +303,10 @@ export default function Home() {
     [eaveCatalog, relationships],
   );
 
-  const vertexBaseElevations = roofPoints.map(() => roofBase);
+  const edgeElevation = useCallback(
+    (index: number) => roofBase + (relationships[index]?.elevationOffset ?? 0),
+    [relationships, roofBase],
+  );
 
   const startCommand = (nextCommand: DrawCommand) => {
     setCommand(nextCommand);
@@ -341,6 +346,7 @@ export default function Home() {
     const nextRelationships = roofPoints.map(() => ({
       conditionId: eaveCatalog[0]?.id ?? "",
       overhang: 1.5,
+      elevationOffset: 0,
     }));
     setRelationships(nextRelationships);
     setRoofClosed(true);
@@ -362,6 +368,7 @@ export default function Home() {
       INITIAL_ROOF_POINTS.map(() => ({
         conditionId: "rafter-seat",
         overhang: 1.5,
+        elevationOffset: 0,
       })),
     );
     setSelection(null);
@@ -750,8 +757,17 @@ export default function Home() {
         return null;
       }
       const slope = pitch / 12;
+      const nearestEdge = roofEdges
+        .map((edge) => ({
+          index: edge.index,
+          distance: pointToSegmentDistance(point, edge.start, edge.end),
+        }))
+        .sort((a, b) => a.distance - b.distance)[0];
+      const localBase = nearestEdge
+        ? edgeElevation(nearestEdge.index)
+        : roofBase;
       if (roofKind === "shed") {
-        return roofBase + (point.x - roofBounds.minX) * slope;
+        return localBase + (point.x - roofBounds.minX) * slope;
       }
       if (roofKind === "gable") {
         const run = dominantRoofAxisIsX
@@ -763,14 +779,9 @@ export default function Home() {
               point.x - roofBounds.minX,
               roofBounds.maxX - point.x,
             );
-        return roofBase + Math.max(0, run) * slope;
+        return localBase + Math.max(0, run) * slope;
       }
-      const run = Math.min(
-        ...roofEdges.map((edge) =>
-          pointToSegmentDistance(point, edge.start, edge.end),
-        ),
-      );
-      return roofBase + Math.max(0, run) * slope;
+      return localBase + Math.max(0, nearestEdge?.distance ?? 0) * slope;
     };
 
     formWallRegions.current = [];
@@ -851,7 +862,10 @@ export default function Home() {
             sum + Math.hypot(point.x - center.x, point.z - center.z),
           0,
         ) / roofPoints.length;
-      const highestBase = Math.max(...vertexBaseElevations, roofBase);
+      const edgeElevations = roofEdges.map((edge) =>
+        edgeElevation(edge.index),
+      );
+      const highestBase = Math.max(...edgeElevations, roofBase);
       const rise = Math.max(2, averageRadius * (pitch / 12));
       const bounds = roofBounds;
       const dominantX = dominantRoofAxisIsX;
@@ -881,16 +895,15 @@ export default function Home() {
         x: center.x,
         y:
           roofKind === "shed"
-            ? vertexBaseElevations.reduce((sum, value) => sum + value, 0) /
-                vertexBaseElevations.length +
+            ? edgeElevations.reduce((sum, value) => sum + value, 0) /
+                edgeElevations.length +
               rise * 0.45
             : highestBase + rise,
         z: center.z,
       };
       const faces = roofEdges.map((edge) => {
-        const startY = vertexBaseElevations[edge.index];
-        const endY =
-          vertexBaseElevations[(edge.index + 1) % vertexBaseElevations.length];
+        const startY = edgeElevation(edge.index);
+        const endY = edgeElevation(edge.index);
         let target = peak;
         if (roofKind === "gable") {
           const edgeMidpoint = midpoint(edge.start, edge.end);
@@ -948,6 +961,33 @@ export default function Home() {
           );
         });
 
+      roofPoints.forEach((point, index) => {
+        const previousElevation = edgeElevation(
+          (index + roofPoints.length - 1) % roofPoints.length,
+        );
+        const currentElevation = edgeElevation(index);
+        if (Math.abs(previousElevation - currentElevation) < 0.01) return;
+        drawPolygon(
+          context,
+          [
+            project({
+              x: point.x,
+              y: previousElevation,
+              z: point.z,
+            }),
+            project({
+              x: point.x,
+              y: currentElevation,
+              z: point.z,
+            }),
+            project(peak),
+          ],
+          "rgba(190, 99, 48, 0.34)",
+          "#8e4c28",
+          1,
+        );
+      });
+
       if (showTopology && roofKind === "gable") {
         context.strokeStyle = "#63371f";
         context.lineWidth = 1.5;
@@ -960,17 +1000,15 @@ export default function Home() {
       }
 
       roofEdges.forEach((edge) => {
+        const eaveElevation = edgeElevation(edge.index);
         const start = project({
           x: edge.start.x,
-          y: vertexBaseElevations[edge.index],
+          y: eaveElevation,
           z: edge.start.z,
         });
         const end = project({
           x: edge.end.x,
-          y:
-            vertexBaseElevations[
-              (edge.index + 1) % vertexBaseElevations.length
-            ],
+          y: eaveElevation,
           z: edge.end.z,
         });
         formEaveRegions.current.push({ index: edge.index, start, end });
@@ -982,6 +1020,19 @@ export default function Home() {
         context.beginPath();
         context.moveTo(start.x, start.y);
         context.lineTo(end.x, end.y);
+        context.stroke();
+        context.beginPath();
+        context.arc(
+          (start.x + end.x) / 2,
+          (start.y + end.y) / 2,
+          selectedEdge ? 6 : 3.5,
+          0,
+          Math.PI * 2,
+        );
+        context.fillStyle = selectedEdge ? "#16838a" : "#fff";
+        context.fill();
+        context.strokeStyle = selectedEdge ? "#16838a" : "#a95829";
+        context.lineWidth = 1.25;
         context.stroke();
       });
 
@@ -1003,6 +1054,7 @@ export default function Home() {
     center.x,
     center.z,
     clipWalls,
+    edgeElevation,
     orbit,
     pitch,
     roofBase,
@@ -1014,7 +1066,6 @@ export default function Home() {
     showDatums,
     showTopology,
     showWalls,
-    vertexBaseElevations,
     wallHeights,
     wallPoints,
     walls,
@@ -1279,7 +1330,7 @@ export default function Home() {
           </div>
 
           <div className="control-section catalog-section">
-            <ControlHeading number="03" title="Eave detail catalog" />
+            <ControlHeading number="03" title="Rafter detail catalog" />
             <p className="catalog-copy">
               Edge details are stored without moving the roof base datum.
             </p>
@@ -1467,7 +1518,7 @@ export default function Home() {
                         { x: pointer.x, z: pointer.y },
                         { x: region.start.x, z: region.start.y },
                         { x: region.end.x, z: region.end.y },
-                      ) <= 9,
+                      ) <= 14,
                   );
                   if (eave) {
                     setSelection({ kind: "roof-edge", index: eave.index });
@@ -1733,7 +1784,47 @@ export default function Home() {
               </div>
               <div className="detail-form inspector-properties">
                 <label>
-                  <span>Eave condition</span>
+                  <span>Eave elevation</span>
+                  <div className="height-input">
+                    <input
+                      type="number"
+                      min={0}
+                      max={40}
+                      step={0.25}
+                      value={edgeElevation(selection.index)}
+                      onChange={(event) => {
+                        const value = Number(event.target.value);
+                        if (!Number.isFinite(value)) return;
+                        updateRelationship(selection.index, {
+                          elevationOffset:
+                            Math.max(0, Math.min(40, value)) - roofBase,
+                        });
+                      }}
+                    />
+                    <span>ft</span>
+                  </div>
+                </label>
+                <Range
+                  label="Raise / lower from roof base"
+                  value={relationships[selection.index]?.elevationOffset ?? 0}
+                  min={-8}
+                  max={8}
+                  step={0.25}
+                  output={
+                    (relationships[selection.index]?.elevationOffset ?? 0) === 0
+                      ? "At base"
+                      : `${(relationships[selection.index]?.elevationOffset ?? 0) > 0 ? "+" : ""}${feetInches(
+                          relationships[selection.index]?.elevationOffset ?? 0,
+                        )}`
+                  }
+                  onChange={(value) =>
+                    updateRelationship(selection.index, {
+                      elevationOffset: value,
+                    })
+                  }
+                />
+                <label>
+                  <span>Rafter detail</span>
                   <select
                     value={relationships[selection.index]?.conditionId ?? ""}
                     onChange={(event) =>
@@ -1784,8 +1875,8 @@ export default function Home() {
                 </label>
               </div>
               <div className="detail-inspector-note">
-                Edge details and overhang are independent of the fixed roof base.
-                Wall heights do not drive this edge.
+                This eave is independently positioned from the fixed roof base.
+                Adjacent corner transitions remain provisional.
               </div>
               <dl className="inspector-data">
                 <div>
@@ -1793,15 +1884,19 @@ export default function Home() {
                   <dd>{feetInches(roofBase)}</dd>
                 </div>
                 <div>
-                  <dt>Wall influence</dt>
-                  <dd>None</dd>
+                  <dt>Eave offset</dt>
+                  <dd>
+                    {feetInches(
+                      relationships[selection.index]?.elevationOffset ?? 0,
+                    )}
+                  </dd>
                 </div>
               </dl>
             </>
           ) : selectedCatalog ? (
             <>
               <InspectorHeader
-                label="EAVE DETAIL CATALOG"
+                label="RAFTER DETAIL CATALOG"
                 title="Edit wall / roof condition"
                 onClose={() => setSelection(null)}
               />
