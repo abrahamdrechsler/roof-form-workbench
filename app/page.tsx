@@ -476,6 +476,15 @@ export default function Home() {
     height: 1.5,
     inset: 0.5,
   });
+  const [selectedCatalogId, setSelectedCatalogId] = useState<string | null>(
+    null,
+  );
+  const [catalogEditDraft, setCatalogEditDraft] = useState({
+    name: "",
+    driver: "heel" as EaveDriver,
+    height: 0,
+    inset: 0,
+  });
 
   const planRef = useRef<HTMLCanvasElement>(null);
   const formRef = useRef<HTMLCanvasElement>(null);
@@ -566,6 +575,7 @@ export default function Home() {
     ]);
     setSelected3DEave(null);
     setShowEaveCreator(false);
+    setSelectedCatalogId(null);
   };
 
   const setSelectedPlateHeight = (value: number) => {
@@ -626,6 +636,87 @@ export default function Home() {
     };
     setEaveCatalog((current) => [...current, condition]);
     setShowEaveCreator(false);
+    setSelectedCatalogId(condition.id);
+    setCatalogEditDraft({
+      name: condition.name,
+      driver: condition.driver,
+      height: condition.height,
+      inset: condition.inset,
+    });
+  };
+
+  const openCatalogInspector = (condition: EaveCondition) => {
+    setSelectedCatalogId(condition.id);
+    setCatalogEditDraft({
+      name: condition.name,
+      driver: condition.driver,
+      height: condition.height,
+      inset: condition.inset,
+    });
+  };
+
+  const updateCatalogCondition = () => {
+    if (!selectedCatalogId) return;
+    const safeHeight = Number.isFinite(catalogEditDraft.height)
+      ? Math.max(0, Math.min(6, catalogEditDraft.height))
+      : 0;
+    const safeInset = Number.isFinite(catalogEditDraft.inset)
+      ? Math.max(-2, Math.min(4, catalogEditDraft.inset))
+      : 0;
+    const updatedCondition = {
+      name: catalogEditDraft.name.trim() || "Untitled eave",
+      driver: catalogEditDraft.driver,
+      height: safeHeight,
+      inset: safeInset,
+    };
+    setEaveCatalog((current) =>
+      current.map((condition) =>
+        condition.id === selectedCatalogId
+          ? { ...condition, ...updatedCondition }
+          : condition,
+      ),
+    );
+    setBearingOffsets((current) =>
+      current.map((offset, index) =>
+        edgeEaveIds[index] === selectedCatalogId ? safeHeight : offset,
+      ),
+    );
+    setBearingInsets((current) =>
+      current.map((inset, index) =>
+        edgeEaveIds[index] === selectedCatalogId ? safeInset : inset,
+      ),
+    );
+    setCatalogEditDraft((current) => ({
+      ...current,
+      name: updatedCondition.name,
+      height: safeHeight,
+      inset: safeInset,
+    }));
+  };
+
+  const deleteCatalogCondition = () => {
+    if (!selectedCatalogId || eaveCatalog.length <= 1) return;
+    const fallback = eaveCatalog.find(
+      (condition) => condition.id !== selectedCatalogId,
+    );
+    if (!fallback) return;
+    setEdgeEaveIds((current) =>
+      current.map((id) => (id === selectedCatalogId ? fallback.id : id)),
+    );
+    setBearingOffsets((current) =>
+      current.map((offset, index) =>
+        edgeEaveIds[index] === selectedCatalogId ? fallback.height : offset,
+      ),
+    );
+    setBearingInsets((current) =>
+      current.map((inset, index) =>
+        edgeEaveIds[index] === selectedCatalogId ? fallback.inset : inset,
+      ),
+    );
+    setEaveCatalog((current) =>
+      current.filter((condition) => condition.id !== selectedCatalogId),
+    );
+    setSelectedCatalogId(null);
   };
 
   const setAuthoredPitch = (value: number) => {
@@ -1499,7 +1590,14 @@ export default function Home() {
             </p>
             <div className="eave-catalog-list">
               {eaveCatalog.map((condition) => (
-                <div className="eave-catalog-item" key={condition.id}>
+                <button
+                  className={`eave-catalog-item ${
+                    selectedCatalogId === condition.id ? "active" : ""
+                  }`}
+                  key={condition.id}
+                  aria-pressed={selectedCatalogId === condition.id}
+                  onClick={() => openCatalogInspector(condition)}
+                >
                   <span className="condition-diagram">
                     <i className="condition-wall" />
                     <i className="condition-roof" />
@@ -1513,7 +1611,8 @@ export default function Home() {
                       {feetInches(condition.height)}
                     </small>
                   </span>
-                </div>
+                  <span className="catalog-chevron">›</span>
+                </button>
               ))}
             </div>
             {showEaveCreator ? (
@@ -2046,6 +2145,133 @@ export default function Home() {
             </ViewPanel>
           )}
         </section>
+
+        {selectedCatalogId && (
+          <aside className="detail-inspector">
+            <header className="detail-inspector-header">
+              <div>
+                <span className="view-label">EAVE DETAIL CATALOG</span>
+                <h2>Edit wall / roof condition</h2>
+              </div>
+              <button
+                aria-label="Close eave detail inspector"
+                onClick={() => setSelectedCatalogId(null)}
+              >
+                ×
+              </button>
+            </header>
+
+            <div className="detail-preview">
+              <span className="preview-ground" />
+              <span className="preview-wall" />
+              <span className="preview-plate" />
+              <span className="preview-roof" />
+              <span className="preview-locator" />
+              <span className="preview-x-dimension" />
+              <span className="preview-y-dimension" />
+              <span className="preview-label plate">T.O. PLATE</span>
+              <span className="preview-label roof">ROOF PLANE</span>
+              <span className="preview-label x">
+                X {feetInches(catalogEditDraft.inset)}
+              </span>
+              <span className="preview-label y">
+                Y +{feetInches(catalogEditDraft.height)}
+              </span>
+            </div>
+
+            <p className="detail-preview-caption">
+              The roof plane passes through this stable locator. Overhang is
+              assigned separately on each roof edge.
+            </p>
+
+            <div className="detail-form">
+              <label>
+                <span>Detail name</span>
+                <input
+                  value={catalogEditDraft.name}
+                  onChange={(event) =>
+                    setCatalogEditDraft((current) => ({
+                      ...current,
+                      name: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <label>
+                <span>Structural driver</span>
+                <select
+                  value={catalogEditDraft.driver}
+                  onChange={(event) =>
+                    setCatalogEditDraft((current) => ({
+                      ...current,
+                      driver: event.target.value as EaveDriver,
+                    }))
+                  }
+                >
+                  <option value="heel">Heel height</option>
+                  <option value="seat">Seat cut</option>
+                </select>
+              </label>
+              <div className="detail-form-row">
+                <label>
+                  <span>X · inboard from wall face</span>
+                  <div>
+                    <input
+                      type="number"
+                      min={-2}
+                      max={4}
+                      step={0.25}
+                      value={catalogEditDraft.inset}
+                      onChange={(event) =>
+                        setCatalogEditDraft((current) => ({
+                          ...current,
+                          inset: Number(event.target.value),
+                        }))
+                      }
+                    />
+                    <i>ft</i>
+                  </div>
+                </label>
+                <label>
+                  <span>Y · above top plate</span>
+                  <div>
+                    <input
+                      type="number"
+                      min={0}
+                      max={6}
+                      step={0.25}
+                      value={catalogEditDraft.height}
+                      onChange={(event) =>
+                        setCatalogEditDraft((current) => ({
+                          ...current,
+                          height: Number(event.target.value),
+                        }))
+                      }
+                    />
+                    <i>ft</i>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            <div className="detail-inspector-note">
+              Saving updates every roof edge currently assigned this detail.
+            </div>
+
+            <div className="detail-inspector-actions">
+              <button
+                className="delete-detail"
+                disabled={eaveCatalog.length <= 1}
+                onClick={deleteCatalogCondition}
+              >
+                Delete
+              </button>
+              <button className="save-detail" onClick={updateCatalogCondition}>
+                Save changes
+              </button>
+            </div>
+          </aside>
+        )}
       </div>
 
       <footer className="statusbar">
