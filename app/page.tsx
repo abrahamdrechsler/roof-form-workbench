@@ -100,6 +100,30 @@ function drawPolygon(
   context.stroke();
 }
 
+function pointInPolygon(
+  point: { x: number; y: number },
+  polygon: { x: number; y: number }[],
+) {
+  let inside = false;
+  for (
+    let index = 0, previous = polygon.length - 1;
+    index < polygon.length;
+    previous = index, index += 1
+  ) {
+    const currentPoint = polygon[index];
+    const previousPoint = polygon[previous];
+    const crosses =
+      currentPoint.y > point.y !== previousPoint.y > point.y &&
+      point.x <
+        ((previousPoint.x - currentPoint.x) *
+          (point.y - currentPoint.y)) /
+          (previousPoint.y - currentPoint.y) +
+          currentPoint.x;
+    if (crosses) inside = !inside;
+  }
+  return inside;
+}
+
 function solveGable(
   buildingWidth: number,
   westBase: number,
@@ -341,10 +365,15 @@ export default function Home() {
   const [showTopology, setShowTopology] = useState(true);
   const [orbit, setOrbit] = useState({ yaw: -42, pitch: 24 });
   const [viewMode, setViewMode] = useState<ViewMode>("split");
+  const [selected3DWall, setSelected3DWall] = useState<number | null>(null);
+  const [wallHeightDraft, setWallHeightDraft] = useState("9.00");
 
   const planRef = useRef<HTMLCanvasElement>(null);
   const formRef = useRef<HTMLCanvasElement>(null);
   const sectionRef = useRef<HTMLCanvasElement>(null);
+  const formWallRegions = useRef<
+    { edge: number; points: { x: number; y: number }[] }[]
+  >([]);
   const orbitDrag = useRef<{
     pointerId: number;
     x: number;
@@ -402,12 +431,30 @@ export default function Home() {
     setShowDatums(true);
     setShowTopology(true);
     setOrbit({ yaw: -42, pitch: 24 });
+    setSelected3DWall(null);
+    setWallHeightDraft("9.00");
   };
 
   const setSelectedPlateHeight = (value: number) => {
     setPlateHeights((current) =>
       current.map((height, index) => (index === selectedEdge ? value : height)),
     );
+  };
+
+  const commitWallHeight = () => {
+    if (selected3DWall === null) return;
+    const parsedHeight = Number(wallHeightDraft);
+    if (!wallHeightDraft.trim() || !Number.isFinite(parsedHeight)) {
+      setWallHeightDraft(plateHeights[selected3DWall].toFixed(2));
+      return;
+    }
+    const nextHeight = Math.max(6, Math.min(30, parsedHeight));
+    setPlateHeights((current) =>
+      current.map((height, index) =>
+        index === selected3DWall ? nextHeight : height,
+      ),
+    );
+    setWallHeightDraft(nextHeight.toFixed(2));
   };
 
   const setAllPlateHeights = (value: number) => {
@@ -702,12 +749,15 @@ export default function Home() {
       ];
     };
 
+    formWallRegions.current = [];
     if (showWalls) {
       const wallFaces = [
         {
+          edge: 0,
           points: endWall(0),
         },
         {
+          edge: 1,
           points: [
             { x: w, y: 0, z: -d },
             { x: w, y: plateHeights[1], z: -d },
@@ -716,9 +766,11 @@ export default function Home() {
           ],
         },
         {
+          edge: 2,
           points: endWall(2),
         },
         {
+          edge: 3,
           points: [
             { x: -w, y: 0, z: d },
             { x: -w, y: plateHeights[3], z: d },
@@ -727,8 +779,7 @@ export default function Home() {
           ],
         },
       ];
-      wallFaces
-        .sort((a, b) => {
+      const orderedWallFaces = wallFaces.sort((a, b) => {
           const centerA = a.points.reduce(
             (sum, point) =>
               sum + point.x * Math.sin(yaw) + point.z * Math.cos(yaw),
@@ -740,15 +791,21 @@ export default function Home() {
             0,
           );
           return centerA - centerB;
-        })
-        .forEach((face) =>
-          drawPolygon(
-            context,
-            face.points.map(project),
-            "#ded9cf",
-            "#aaa399",
-          ),
+        });
+      formWallRegions.current = orderedWallFaces.map((face) => ({
+        edge: face.edge,
+        points: face.points.map(project),
+      }));
+      orderedWallFaces.forEach((face) => {
+        const selected = face.edge === selected3DWall;
+        drawPolygon(
+          context,
+          face.points.map(project),
+          selected ? "#d7e7e5" : "#ded9cf",
+          selected ? "#16838a" : "#aaa399",
+          selected ? 2.5 : 1,
         );
+      });
     }
 
     const faces = makeRoofFaces(
@@ -878,6 +935,7 @@ export default function Home() {
     selectedEdge,
     selectedDrivesRoof,
     selectedPlane,
+    selected3DWall,
     showDatums,
     showTopology,
     showWalls,
@@ -1256,11 +1314,28 @@ export default function Home() {
             <canvas
               ref={formRef}
               aria-label="Three dimensional structural roof form"
-              onClick={() => {
+              onClick={(event) => {
                 if (didOrbit.current) {
                   didOrbit.current = false;
                   return;
                 }
+                const canvas = formRef.current;
+                if (!canvas) return;
+                const rect = canvas.getBoundingClientRect();
+                const pointer = {
+                  x: event.clientX - rect.left,
+                  y: event.clientY - rect.top,
+                };
+                const wall = [...formWallRegions.current]
+                  .reverse()
+                  .find((region) => pointInPolygon(pointer, region.points));
+                if (wall) {
+                  setSelectedEdge(wall.edge);
+                  setSelected3DWall(wall.edge);
+                  setWallHeightDraft(plateHeights[wall.edge].toFixed(2));
+                  return;
+                }
+                setSelected3DWall(null);
                 setSelectedPlane(
                   roofKind === "shed"
                     ? "shed-plane"
@@ -1318,6 +1393,53 @@ export default function Home() {
             <div className="orientation">
               {Math.round(((orbit.yaw % 360) + 360) % 360)}°
             </div>
+            {showWalls && selected3DWall !== null && (
+              <div className="wall-height-popover">
+                <div className="wall-height-popover-heading">
+                  <div>
+                    <span className="view-label">SELECTED WALL</span>
+                    <strong>{EDGE_LABELS[selected3DWall]} wall</strong>
+                  </div>
+                  <button
+                    aria-label="Close wall height editor"
+                    onClick={() => setSelected3DWall(null)}
+                  >
+                    ×
+                  </button>
+                </div>
+                <label>
+                  <span>Top / plate height</span>
+                  <div className="height-input">
+                    <input
+                      autoFocus
+                      type="number"
+                      min={6}
+                      max={30}
+                      step={0.25}
+                      value={wallHeightDraft}
+                      onChange={(event) => setWallHeightDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          commitWallHeight();
+                          event.currentTarget.blur();
+                        }
+                        if (event.key === "Escape") {
+                          setWallHeightDraft(
+                            plateHeights[selected3DWall].toFixed(2),
+                          );
+                          setSelected3DWall(null);
+                        }
+                      }}
+                    />
+                    <span>ft</span>
+                  </div>
+                </label>
+                <small>
+                  Current {feetInches(plateHeights[selected3DWall])} · Enter to
+                  apply
+                </small>
+              </div>
+            )}
             </ViewPanel>
           )}
         </section>

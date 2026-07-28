@@ -518,6 +518,97 @@ canvas {
   margin-top: 10px;
 }
 
+.wall-height-popover {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  width: 224px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid #9dc3c1;
+  border-radius: 7px;
+  box-shadow: 0 8px 24px rgba(48, 42, 35, 0.14);
+  backdrop-filter: blur(7px);
+}
+
+.wall-height-popover-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.wall-height-popover-heading strong {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+}
+
+.wall-height-popover-heading button {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.wall-height-popover-heading button:hover {
+  color: var(--ink);
+  background: #efede8;
+}
+
+.wall-height-popover label {
+  display: block;
+  margin-top: 12px;
+}
+
+.wall-height-popover label > span {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.height-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  align-items: center;
+  margin-top: 5px;
+  border: 1px solid var(--teal);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.height-input input {
+  width: 100%;
+  height: 34px;
+  padding: 0 9px;
+  color: var(--ink);
+  background: white;
+  border: 0;
+  outline: 0;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.height-input > span {
+  color: var(--muted);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 10px;
+}
+
+.wall-height-popover small {
+  display: block;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 8px;
+}
+
 .view-tabs {
   display: flex;
   padding: 2px;
