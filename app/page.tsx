@@ -1478,6 +1478,23 @@ export default function Home() {
     }
   };
 
+  const previewInset = Number.isFinite(catalogEditDraft.inset)
+    ? Math.max(-2, Math.min(4, catalogEditDraft.inset))
+    : 0;
+  const previewHeight = Number.isFinite(catalogEditDraft.height)
+    ? Math.max(0, Math.min(6, catalogEditDraft.height))
+    : 0;
+  const previewWallFaceX = 158;
+  const previewPlateY = 146;
+  const previewLocatorX = previewWallFaceX - previewInset * 22;
+  const previewLocatorY = previewPlateY + previewHeight * 9;
+  const previewXStart = Math.min(previewWallFaceX, previewLocatorX);
+  const previewXWidth = Math.max(
+    1,
+    Math.abs(previewWallFaceX - previewLocatorX),
+  );
+  const previewYHeight = Math.max(1, previewLocatorY - previewPlateY);
+
   return (
     <main className="studio-shell">
       <header className="topbar">
@@ -2165,17 +2182,67 @@ export default function Home() {
               <span className="preview-ground" />
               <span className="preview-wall" />
               <span className="preview-plate" />
-              <span className="preview-roof" />
-              <span className="preview-locator" />
-              <span className="preview-x-dimension" />
-              <span className="preview-y-dimension" />
+              <span
+                className="preview-roof"
+                style={{
+                  left: previewLocatorX - 55,
+                  bottom: previewLocatorY - 4.5,
+                }}
+              />
+              <span
+                className="preview-locator"
+                style={{
+                  left: previewLocatorX - 5.5,
+                  bottom: previewLocatorY - 5.5,
+                }}
+              />
+              <span
+                className="preview-x-dimension"
+                style={{
+                  left: previewXStart,
+                  width: previewXWidth,
+                  bottom: previewPlateY - 23,
+                }}
+              />
+              <span
+                className="preview-y-dimension"
+                style={{
+                  left: previewWallFaceX + 20,
+                  bottom: previewPlateY,
+                  height: previewYHeight,
+                }}
+              />
               <span className="preview-label plate">T.O. PLATE</span>
               <span className="preview-label roof">ROOF PLANE</span>
-              <span className="preview-label x">
+              <span
+                className="preview-label x"
+                style={{
+                  left: previewXStart + previewXWidth / 2 - 22,
+                  bottom: previewPlateY - 39,
+                }}
+              >
                 X {feetInches(catalogEditDraft.inset)}
               </span>
-              <span className="preview-label y">
+              <span
+                className="preview-label y"
+                style={{
+                  left: previewWallFaceX + 28,
+                  bottom:
+                    previewPlateY + previewYHeight / 2 - 5,
+                }}
+              >
                 Y +{feetInches(catalogEditDraft.height)}
+              </span>
+              <span
+                className="preview-label driver"
+                style={{
+                  left: previewLocatorX - 30,
+                  bottom: previewLocatorY + 15,
+                }}
+              >
+                {catalogEditDraft.driver === "heel"
+                  ? "HEEL DATUM"
+                  : "SEAT CUT"}
               </span>
             </div>
 

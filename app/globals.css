@@ -881,7 +881,10 @@ canvas {
   background: var(--orange);
   box-shadow: 0 1px 0 #9b572c;
   transform: rotate(-18deg);
-  transform-origin: left center;
+  transform-origin: 55px center;
+  transition:
+    left 120ms ease,
+    bottom 120ms ease;
 }
 
 .preview-locator {
@@ -893,6 +896,9 @@ canvas {
   border: 2px solid white;
   border-radius: 50%;
   box-shadow: 0 0 0 1px var(--teal);
+  transition:
+    left 120ms ease,
+    bottom 120ms ease;
 }
 
 .preview-x-dimension {
@@ -901,6 +907,9 @@ canvas {
   width: 35px;
   height: 1px;
   background: var(--teal);
+  transition:
+    left 120ms ease,
+    width 120ms ease;
 }
 
 .preview-x-dimension::before,
@@ -933,6 +942,9 @@ canvas {
   width: 1px;
   height: 17px;
   background: var(--teal);
+  transition:
+    bottom 120ms ease,
+    height 120ms ease;
 }
 
 .preview-y-dimension::before,
@@ -980,6 +992,15 @@ canvas {
   left: 186px;
   bottom: 146px;
   color: var(--teal);
+}
+
+.preview-label.driver {
+  color: white;
+  background: var(--teal);
+  border-radius: 3px;
+  transition:
+    left 120ms ease,
+    bottom 120ms ease;
 }
 
 .detail-preview-caption {
