@@ -862,43 +862,37 @@ export default function Home() {
             sum + Math.hypot(point.x - center.x, point.z - center.z),
           0,
         ) / roofPoints.length;
-      const edgeElevations = roofEdges.map((edge) =>
-        edgeElevation(edge.index),
-      );
-      const highestBase = Math.max(...edgeElevations, roofBase);
       const rise = Math.max(2, averageRadius * (pitch / 12));
       const bounds = roofBounds;
       const dominantX = dominantRoofAxisIsX;
       const ridgeA: Point3 = dominantX
         ? {
             x: bounds.minX + (bounds.maxX - bounds.minX) * 0.28,
-            y: highestBase + rise,
+            y: roofBase + rise,
             z: center.z,
           }
         : {
             x: center.x,
-            y: highestBase + rise,
+            y: roofBase + rise,
             z: bounds.minZ + (bounds.maxZ - bounds.minZ) * 0.28,
           };
       const ridgeB: Point3 = dominantX
         ? {
             x: bounds.maxX - (bounds.maxX - bounds.minX) * 0.28,
-            y: highestBase + rise,
+            y: roofBase + rise,
             z: center.z,
           }
         : {
             x: center.x,
-            y: highestBase + rise,
+            y: roofBase + rise,
             z: bounds.maxZ - (bounds.maxZ - bounds.minZ) * 0.28,
           };
       const peak: Point3 = {
         x: center.x,
         y:
           roofKind === "shed"
-            ? edgeElevations.reduce((sum, value) => sum + value, 0) /
-                edgeElevations.length +
-              rise * 0.45
-            : highestBase + rise,
+            ? roofBase + rise * 0.45
+            : roofBase + rise,
         z: center.z,
       };
       const cornerElevations = roofPoints.map((_, index) => {
@@ -1967,7 +1961,8 @@ export default function Home() {
               <div className="detail-inspector-note">
                 This eave is independently positioned from the fixed roof base.
                 Its center run stays horizontal while the ends slope to shared
-                corner elevations.
+                corner elevations. The ridge stays fixed, so moving this eave
+                changes the adjacent face slopes.
               </div>
               <dl className="inspector-data">
                 <div>
