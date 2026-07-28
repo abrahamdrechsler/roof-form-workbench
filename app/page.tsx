@@ -3,9 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 type RoofKind = "gable" | "hip" | "shed";
-type EdgeRole = "bearing" | "gable" | "high" | "low";
 type ViewMode = "split" | "plan" | "form";
+type DrawCommand = "select" | "walls" | "roof";
 type EaveDriver = "heel" | "seat";
+type Point2 = { x: number; z: number };
+type Point3 = { x: number; y: number; z: number };
+type ScreenPoint = { x: number; y: number };
 type EaveCondition = {
   id: string;
   name: string;
@@ -13,36 +16,30 @@ type EaveCondition = {
   height: number;
   inset: number;
 };
-type Point3 = { x: number; y: number; z: number };
-type RoofFace = {
-  id: string;
-  label: string;
-  color: string;
-  points: Point3[];
+type EdgeRelationship = {
+  wallIndex: number | null;
+  conditionId: string;
+  overhang: number;
 };
+type Selection =
+  | { kind: "wall"; index: number }
+  | { kind: "roof-edge"; index: number }
+  | { kind: "catalog"; id: string }
+  | null;
 
-const PRESETS: Record<
-  RoofKind,
-  { label: string; description: string; roles: EdgeRole[] }
-> = {
-  gable: {
-    label: "Gable",
-    description: "Two planes meet at a centered ridge.",
-    roles: ["gable", "bearing", "gable", "bearing"],
-  },
-  hip: {
-    label: "Hip",
-    description: "Every perimeter edge generates a roof plane.",
-    roles: ["bearing", "bearing", "bearing", "bearing"],
-  },
-  shed: {
-    label: "Shed",
-    description: "One plane rises from a low to high plate rail.",
-    roles: ["gable", "high", "gable", "low"],
-  },
-};
+const INITIAL_WALL_POINTS: Point2[] = [
+  { x: -14, z: -20 },
+  { x: 14, z: -20 },
+  { x: 14, z: 20 },
+  { x: -14, z: 20 },
+];
 
-const EDGE_LABELS = ["North", "East", "South", "West"];
+const INITIAL_ROOF_POINTS: Point2[] = [
+  { x: -16, z: -22 },
+  { x: 16, z: -22 },
+  { x: 16, z: 22 },
+  { x: -16, z: 22 },
+];
 
 const INITIAL_EAVE_CONDITIONS: EaveCondition[] = [
   {
@@ -61,17 +58,60 @@ const INITIAL_EAVE_CONDITIONS: EaveCondition[] = [
   },
 ];
 
+const ROOF_FORMS: Record<RoofKind, { label: string; description: string }> = {
+  hip: {
+    label: "Hip",
+    description: "Each boundary edge contributes a roof plane.",
+  },
+  gable: {
+    label: "Gable",
+    description: "Boundary planes resolve toward a central ridge.",
+  },
+  shed: {
+    label: "Shed",
+    description: "One broad plane crosses the authored boundary.",
+  },
+};
+
 function feetInches(value: number) {
-  const feet = Math.floor(value);
-  const inches = Math.round((value - feet) * 12);
-  return `${feet}′ ${inches || 0}″`;
+  const sign = value < 0 ? "−" : "";
+  const absolute = Math.abs(value);
+  let feet = Math.floor(absolute);
+  let inches = Math.round((absolute - feet) * 12);
+  if (inches === 12) {
+    feet += 1;
+    inches = 0;
+  }
+  return `${sign}${feet}′ ${inches}″`;
 }
 
-function roleLabel(role: EdgeRole) {
-  if (role === "bearing") return "Bearing / slope";
-  if (role === "gable") return "Gable";
-  if (role === "high") return "High plate";
-  return "Low plate";
+function segmentLength(start: Point2, end: Point2) {
+  return Math.hypot(end.x - start.x, end.z - start.z);
+}
+
+function midpoint(start: Point2, end: Point2): Point2 {
+  return { x: (start.x + end.x) / 2, z: (start.z + end.z) / 2 };
+}
+
+function pointToSegmentDistance(point: Point2, start: Point2, end: Point2) {
+  const deltaX = end.x - start.x;
+  const deltaZ = end.z - start.z;
+  const lengthSquared = deltaX * deltaX + deltaZ * deltaZ;
+  if (lengthSquared === 0) {
+    return Math.hypot(point.x - start.x, point.z - start.z);
+  }
+  const amount = Math.max(
+    0,
+    Math.min(
+      1,
+      ((point.x - start.x) * deltaX + (point.z - start.z) * deltaZ) /
+        lengthSquared,
+    ),
+  );
+  return Math.hypot(
+    point.x - (start.x + amount * deltaX),
+    point.z - (start.z + amount * deltaZ),
+  );
 }
 
 function prepareCanvas(canvas: HTMLCanvasElement) {
@@ -86,34 +126,14 @@ function prepareCanvas(canvas: HTMLCanvasElement) {
   return { context, width: rect.width, height: rect.height };
 }
 
-function drawGrid(
-  context: CanvasRenderingContext2D,
-  width: number,
-  height: number,
-) {
-  context.strokeStyle = "#e9e6df";
-  context.lineWidth = 1;
-  for (let x = 0; x <= width; x += 24) {
-    context.beginPath();
-    context.moveTo(x, 0);
-    context.lineTo(x, height);
-    context.stroke();
-  }
-  for (let y = 0; y <= height; y += 24) {
-    context.beginPath();
-    context.moveTo(0, y);
-    context.lineTo(width, y);
-    context.stroke();
-  }
-}
-
 function drawPolygon(
   context: CanvasRenderingContext2D,
-  points: { x: number; y: number }[],
+  points: ScreenPoint[],
   fill: string,
   stroke: string,
   lineWidth = 1,
 ) {
+  if (points.length < 3) return;
   context.beginPath();
   context.moveTo(points[0].x, points[0].y);
   points.slice(1).forEach((point) => context.lineTo(point.x, point.y));
@@ -125,10 +145,7 @@ function drawPolygon(
   context.stroke();
 }
 
-function pointInPolygon(
-  point: { x: number; y: number },
-  polygon: { x: number; y: number }[],
-) {
+function pointInPolygon(point: ScreenPoint, polygon: ScreenPoint[]) {
   let inside = false;
   for (
     let index = 0, previous = polygon.length - 1;
@@ -149,351 +166,106 @@ function pointInPolygon(
   return inside;
 }
 
-function pointToSegmentDistance(
-  point: { x: number; y: number },
-  start: { x: number; y: number },
-  end: { x: number; y: number },
-) {
-  const deltaX = end.x - start.x;
-  const deltaY = end.y - start.y;
-  const lengthSquared = deltaX * deltaX + deltaY * deltaY;
-  if (lengthSquared === 0) return Math.hypot(point.x - start.x, point.y - start.y);
-  const t = Math.max(
-    0,
-    Math.min(
-      1,
-      ((point.x - start.x) * deltaX + (point.y - start.y) * deltaY) /
-        lengthSquared,
-    ),
-  );
-  return Math.hypot(
-    point.x - (start.x + t * deltaX),
-    point.y - (start.y + t * deltaY),
-  );
+function wallSegments(points: Point2[], closed: boolean) {
+  const segments = points.slice(1).map((end, index) => ({
+    start: points[index],
+    end,
+    index,
+  }));
+  if (closed && points.length > 2) {
+    segments.push({
+      start: points[points.length - 1],
+      end: points[0],
+      index: points.length - 1,
+    });
+  }
+  return segments;
 }
 
-function solveGable(
-  buildingWidth: number,
-  westBase: number,
-  eastBase: number,
-  pitch: number,
-) {
-  const halfWidth = buildingWidth / 2;
-  const slope = Math.max(pitch / 12, 0.001);
-  const rawRidgeX = (eastBase - westBase) / (2 * slope);
-  const ridgeX = Math.max(-halfWidth, Math.min(halfWidth, rawRidgeX));
-  const ridgeElevation = westBase + slope * (ridgeX + halfWidth);
+function roofSegments(points: Point2[], closed: boolean) {
+  if (!closed || points.length < 3) return [];
+  return points.map((start, index) => ({
+    start,
+    end: points[(index + 1) % points.length],
+    index,
+  }));
+}
+
+function nearestWallIndex(point: Point2, points: Point2[], closed: boolean) {
+  const segments = wallSegments(points, closed);
+  if (!segments.length) return null;
+  return segments.reduce(
+    (nearest, segment) => {
+      const distance = pointToSegmentDistance(point, segment.start, segment.end);
+      return distance < nearest.distance
+        ? { index: segment.index, distance }
+        : nearest;
+    },
+    { index: segments[0].index, distance: Number.POSITIVE_INFINITY },
+  ).index;
+}
+
+function modelCenter(walls: Point2[], roof: Point2[]) {
+  const points = [...walls, ...roof];
+  if (!points.length) return { x: 0, z: 0 };
   return {
-    westBase,
-    eastBase,
-    ridgeX,
-    ridgeElevation,
-    resolved: rawRidgeX >= -halfWidth && rawRidgeX <= halfWidth,
+    x: points.reduce((sum, point) => sum + point.x, 0) / points.length,
+    z: points.reduce((sum, point) => sum + point.z, 0) / points.length,
   };
 }
 
-type PlanPoint = { x: number; z: number };
-type RoofPlaneDefinition = {
-  id: string;
-  label: string;
-  color: string;
-  a: number;
-  b: number;
-  c: number;
-};
-
-function makeHipPlaneDefinitions(
-  halfWidth: number,
-  halfDepth: number,
-  bearingElevations: number[],
-  pitch: number,
-): RoofPlaneDefinition[] {
-  const slope = Math.max(pitch / 12, 0.001);
-  return [
-    {
-      id: "north-hip",
-      label: "North hip plane",
-      color: "#e78a4e",
-      a: 0,
-      b: slope,
-      c: bearingElevations[0] + slope * halfDepth,
-    },
-    {
-      id: "east-plane",
-      label: "East roof plane",
-      color: "#ef9e67",
-      a: -slope,
-      b: 0,
-      c: bearingElevations[1] + slope * halfWidth,
-    },
-    {
-      id: "south-hip",
-      label: "South hip plane",
-      color: "#f2ae7e",
-      a: 0,
-      b: -slope,
-      c: bearingElevations[2] + slope * halfDepth,
-    },
-    {
-      id: "west-plane",
-      label: "West roof plane",
-      color: "#d97834",
-      a: slope,
-      b: 0,
-      c: bearingElevations[3] + slope * halfWidth,
-    },
-  ];
-}
-
-function evaluatePlane(plane: RoofPlaneDefinition, point: PlanPoint) {
-  return plane.a * point.x + plane.b * point.z + plane.c;
-}
-
-function clipPlanPolygon(
-  polygon: PlanPoint[],
-  a: number,
-  b: number,
-  c: number,
-) {
-  const result: PlanPoint[] = [];
-  if (polygon.length === 0) return result;
-  polygon.forEach((current, index) => {
-    const previous = polygon[(index + polygon.length - 1) % polygon.length];
-    const previousValue = a * previous.x + b * previous.z + c;
-    const currentValue = a * current.x + b * current.z + c;
-    const previousInside = previousValue <= 0.0001;
-    const currentInside = currentValue <= 0.0001;
-
-    if (previousInside !== currentInside) {
-      const t = previousValue / (previousValue - currentValue);
-      result.push({
-        x: previous.x + (current.x - previous.x) * t,
-        z: previous.z + (current.z - previous.z) * t,
-      });
-    }
-    if (currentInside) result.push(current);
-  });
-  return result;
-}
-
-function hipRoofHeight(
-  x: number,
-  z: number,
-  halfWidth: number,
-  halfDepth: number,
-  bearingElevations: number[],
-  pitch: number,
-) {
-  const point = { x, z };
-  return Math.min(
-    ...makeHipPlaneDefinitions(
-      halfWidth,
-      halfDepth,
-      bearingElevations,
-      pitch,
-    ).map((plane) => evaluatePlane(plane, point)),
-  );
-}
-
-function makeRoofFaces(
-  kind: RoofKind,
-  buildingWidth: number,
-  buildingDepth: number,
-  bearingElevations: number[],
-  overhangs: number[],
-  pitch: number,
-  roofResolved: boolean,
-) {
-  if (!roofResolved) return [];
-  const w = buildingWidth / 2;
-  const d = buildingDepth / 2;
-  const westExtent = -w - overhangs[3];
-  const eastExtent = w + overhangs[1];
-  const northExtent = -d - overhangs[0];
-  const southExtent = d + overhangs[2];
-  const slope = Math.max(pitch / 12, 0.001);
-  const eastBase = bearingElevations[1];
-  const westBase = bearingElevations[3];
-  const gable = solveGable(
-    buildingWidth,
-    westBase,
-    eastBase,
-    pitch,
-  );
-  const faces: RoofFace[] = [];
-
-  if (kind === "gable") {
-    faces.push(
-      {
-        id: "west-plane",
-        label: "West roof plane",
-        color: "#d97834",
-        points: [
-          {
-            x: westExtent,
-            y: gable.westBase - overhangs[3] * slope,
-            z: northExtent,
-          },
-          {
-            x: westExtent,
-            y: gable.westBase - overhangs[3] * slope,
-            z: southExtent,
-          },
-          { x: gable.ridgeX, y: gable.ridgeElevation, z: southExtent },
-          { x: gable.ridgeX, y: gable.ridgeElevation, z: northExtent },
-        ],
-      },
-      {
-        id: "east-plane",
-        label: "East roof plane",
-        color: "#ef9e67",
-        points: [
-          { x: gable.ridgeX, y: gable.ridgeElevation, z: northExtent },
-          { x: gable.ridgeX, y: gable.ridgeElevation, z: southExtent },
-          {
-            x: eastExtent,
-            y: gable.eastBase - overhangs[1] * slope,
-            z: southExtent,
-          },
-          {
-            x: eastExtent,
-            y: gable.eastBase - overhangs[1] * slope,
-            z: northExtent,
-          },
-        ],
-      },
-    );
-  }
-
-  if (kind === "hip") {
-    const rectangle: PlanPoint[] = [
-      { x: westExtent, z: northExtent },
-      { x: eastExtent, z: northExtent },
-      { x: eastExtent, z: southExtent },
-      { x: westExtent, z: southExtent },
-    ];
-    const planes = makeHipPlaneDefinitions(
-      w,
-      d,
-      bearingElevations,
-      pitch,
-    );
-    planes.forEach((plane, planeIndex) => {
-      let region = rectangle;
-      planes.forEach((other, otherIndex) => {
-        if (planeIndex === otherIndex) return;
-        region = clipPlanPolygon(
-          region,
-          plane.a - other.a,
-          plane.b - other.b,
-          plane.c - other.c,
-        );
-      });
-      if (region.length < 3) return;
-      faces.push({
-        id: plane.id,
-        label: plane.label,
-        color: plane.color,
-        points: region.map((point) => ({
-          x: point.x,
-          y: evaluatePlane(plane, point),
-          z: point.z,
-        })),
-      });
-    });
-  }
-
-  if (kind === "shed") {
-    faces.push({
-      id: "shed-plane",
-      label: "Shed roof plane",
-      color: "#dd8247",
-      points: [
-        {
-          x: westExtent,
-          y: westBase - overhangs[3] * slope,
-          z: northExtent,
-        },
-        {
-          x: westExtent,
-          y: westBase - overhangs[3] * slope,
-          z: southExtent,
-        },
-        {
-          x: eastExtent,
-          y: eastBase + overhangs[1] * slope,
-          z: southExtent,
-        },
-        {
-          x: eastExtent,
-          y: eastBase + overhangs[1] * slope,
-          z: northExtent,
-        },
-      ],
-    });
-  }
-  return faces;
-}
-
 export default function Home() {
-  const [roofKind, setRoofKind] = useState<RoofKind>("gable");
-  const [buildingWidth, setBuildingWidth] = useState(28);
-  const [buildingDepth, setBuildingDepth] = useState(40);
-  const [plateHeights, setPlateHeights] = useState([9, 9, 9, 9]);
-  const [bearingOffsets, setBearingOffsets] = useState([
-    0.75, 0.75, 0.75, 0.75,
-  ]);
-  const [bearingInsets, setBearingInsets] = useState([0.25, 0.25, 0.25, 0.25]);
-  const [edgeOverhangs, setEdgeOverhangs] = useState([1.5, 1.5, 1.5, 1.5]);
-  const [pitch, setPitch] = useState(6);
-  const [selectedEdge, setSelectedEdge] = useState(1);
-  const [selectedPlane, setSelectedPlane] = useState("east-plane");
-  const [showWalls, setShowWalls] = useState(true);
-  const [showDatums, setShowDatums] = useState(true);
-  const [showTopology, setShowTopology] = useState(true);
-  const [orbit, setOrbit] = useState({ yaw: -42, pitch: 24 });
   const [viewMode, setViewMode] = useState<ViewMode>("split");
-  const [selected3DWall, setSelected3DWall] = useState<number | null>(null);
+  const [command, setCommand] = useState<DrawCommand>("select");
+  const [wallPoints, setWallPoints] = useState<Point2[]>(INITIAL_WALL_POINTS);
+  const [wallsClosed, setWallsClosed] = useState(true);
+  const [roofPoints, setRoofPoints] = useState<Point2[]>(INITIAL_ROOF_POINTS);
+  const [roofClosed, setRoofClosed] = useState(true);
+  const [wallHeights, setWallHeights] = useState([9, 9, 9, 9]);
+  const [roofBase, setRoofBase] = useState(10);
+  const [pitch, setPitch] = useState(6);
+  const [roofKind, setRoofKind] = useState<RoofKind>("hip");
+  const [selection, setSelection] = useState<Selection>(null);
+  const [pointerWorld, setPointerWorld] = useState<Point2 | null>(null);
   const [wallHeightDraft, setWallHeightDraft] = useState("9.00");
-  const [wallHandlePosition, setWallHandlePosition] = useState<{
-    x: number;
-    y: number;
-  } | null>(null);
+  const [orbit, setOrbit] = useState({ yaw: -42, pitch: 24 });
+  const [showWalls, setShowWalls] = useState(true);
+  const [showTopology, setShowTopology] = useState(true);
+  const [showDatums, setShowDatums] = useState(true);
+  const [wallHandlePosition, setWallHandlePosition] =
+    useState<ScreenPoint | null>(null);
   const [eaveCatalog, setEaveCatalog] = useState<EaveCondition[]>(
     INITIAL_EAVE_CONDITIONS,
   );
-  const [edgeEaveIds, setEdgeEaveIds] = useState([
-    "rafter-seat",
-    "rafter-seat",
-    "rafter-seat",
-    "rafter-seat",
-  ]);
-  const [selected3DEave, setSelected3DEave] = useState<number | null>(null);
-  const [showEaveCreator, setShowEaveCreator] = useState(false);
-  const [eaveDraft, setEaveDraft] = useState({
-    name: "New eave condition",
-    driver: "heel" as EaveDriver,
-    height: 1.5,
-    inset: 0.5,
-  });
-  const [selectedCatalogId, setSelectedCatalogId] = useState<string | null>(
-    null,
+  const [relationships, setRelationships] = useState<EdgeRelationship[]>(
+    INITIAL_ROOF_POINTS.map((_, index) => ({
+      wallIndex: index,
+      conditionId: "rafter-seat",
+      overhang: 1.5,
+    })),
   );
-  const [catalogEditDraft, setCatalogEditDraft] = useState({
+  const [catalogDraft, setCatalogDraft] = useState({
     name: "",
     driver: "heel" as EaveDriver,
     height: 0,
     inset: 0,
   });
+  const [showCatalogCreator, setShowCatalogCreator] = useState(false);
+  const [newCatalogDraft, setNewCatalogDraft] = useState({
+    name: "New eave condition",
+    driver: "heel" as EaveDriver,
+    height: 1.5,
+    inset: 0.5,
+  });
 
   const planRef = useRef<HTMLCanvasElement>(null);
   const formRef = useRef<HTMLCanvasElement>(null);
-  const sectionRef = useRef<HTMLCanvasElement>(null);
+  const planScaleRef = useRef({ scale: 10, centerX: 0, centerY: 0 });
   const formWallRegions = useRef<
-    { edge: number; points: { x: number; y: number }[] }[]
+    { index: number; points: ScreenPoint[] }[]
   >([]);
   const formEaveRegions = useRef<
-    { edge: number; points: { x: number; y: number }[] }[]
+    { index: number; start: ScreenPoint; end: ScreenPoint }[]
   >([]);
   const orbitDrag = useRef<{
     pointerId: number;
@@ -509,235 +281,195 @@ export default function Home() {
   } | null>(null);
   const didOrbit = useRef(false);
 
-  const roles = PRESETS[roofKind].roles;
-  const bearingElevations = plateHeights.map(
-    (height, index) =>
-      height +
-      bearingOffsets[index] -
-      bearingInsets[index] * (Math.max(pitch, 0.001) / 12),
+  const walls = wallSegments(wallPoints, wallsClosed);
+  const roofEdges = roofSegments(roofPoints, roofClosed);
+  const center = modelCenter(wallPoints, roofPoints);
+
+  const conditionForEdge = useCallback(
+    (index: number) =>
+      eaveCatalog.find(
+        (condition) => condition.id === relationships[index]?.conditionId,
+      ) ?? eaveCatalog[0],
+    [eaveCatalog, relationships],
   );
-  const overhangs = edgeOverhangs;
-  const effectivePitch =
-    roofKind === "shed"
-      ? (Math.abs(bearingElevations[1] - bearingElevations[3]) /
-          buildingWidth) *
-        12
-      : pitch;
-  const gableSolution = solveGable(
-    buildingWidth,
-    bearingElevations[3],
-    bearingElevations[1],
-    effectivePitch,
+
+  const edgeBaseElevation = useCallback(
+    (index: number) => {
+      const relationship = relationships[index];
+      if (!relationship || relationship.wallIndex === null) return roofBase;
+      const condition = conditionForEdge(index);
+      const plate = wallHeights[relationship.wallIndex] ?? 9;
+      return (
+        plate +
+        (condition?.height ?? 0) -
+        (condition?.inset ?? 0) * (pitch / 12)
+      );
+    },
+    [conditionForEdge, pitch, relationships, roofBase, wallHeights],
   );
-  const hipBearingSpread =
-    Math.max(...bearingElevations) - Math.min(...bearingElevations);
-  const hipVariableTransition =
-    roofKind === "hip" && hipBearingSpread > 0.01;
-  const roofResolved =
-    roofKind === "hip" ? true : gableSolution.resolved;
-  const ridgeElevation =
-    roofKind === "shed"
-      ? Math.max(bearingElevations[1], bearingElevations[3])
-      : roofKind === "gable"
-        ? gableSolution.ridgeElevation
-        : Math.max(...bearingElevations) +
-          (buildingWidth / 2) * (pitch / 12);
-  const selectedRole = roles[selectedEdge];
-  const selectedDrivesRoof =
-    selectedRole === "bearing" ||
-    selectedRole === "high" ||
-    selectedRole === "low";
+
+  const vertexBaseElevations = roofPoints.map((_, index) => {
+    if (!roofClosed || roofPoints.length < 3) return roofBase;
+    const previous = edgeBaseElevation(
+      (index + roofPoints.length - 1) % roofPoints.length,
+    );
+    return (previous + edgeBaseElevation(index)) / 2;
+  });
+
+  const startCommand = (nextCommand: DrawCommand) => {
+    setCommand(nextCommand);
+    setSelection(null);
+    setPointerWorld(null);
+    if (nextCommand === "walls") {
+      setWallPoints([]);
+      setWallsClosed(false);
+      setWallHeights([]);
+    }
+    if (nextCommand === "roof") {
+      setRoofPoints([]);
+      setRoofClosed(false);
+      setRelationships([]);
+    }
+  };
+
+  const finishWalls = () => {
+    if (wallPoints.length < 2) return;
+    setCommand("select");
+    setPointerWorld(null);
+  };
+
+  const closeWalls = () => {
+    if (wallPoints.length < 3) return;
+    setWallsClosed(true);
+    setWallHeights((current) => [
+      ...current.slice(0, wallPoints.length - 1),
+      current[wallPoints.length - 1] ?? 9,
+    ]);
+    setCommand("select");
+    setPointerWorld(null);
+  };
+
+  const closeRoof = () => {
+    if (roofPoints.length < 3) return;
+    const nextRelationships = roofPoints.map((point, index) => {
+      const edgeMidpoint = midpoint(
+        point,
+        roofPoints[(index + 1) % roofPoints.length],
+      );
+      return {
+        wallIndex: nearestWallIndex(edgeMidpoint, wallPoints, wallsClosed),
+        conditionId: eaveCatalog[0]?.id ?? "",
+        overhang: 1.5,
+      };
+    });
+    setRelationships(nextRelationships);
+    setRoofClosed(true);
+    setCommand("select");
+    setPointerWorld(null);
+  };
 
   const reset = () => {
-    setRoofKind("gable");
-    setBuildingWidth(28);
-    setBuildingDepth(40);
-    setPlateHeights([9, 9, 9, 9]);
-    setBearingOffsets([0.75, 0.75, 0.75, 0.75]);
-    setBearingInsets([0.25, 0.25, 0.25, 0.25]);
-    setEdgeOverhangs([1.5, 1.5, 1.5, 1.5]);
+    setWallPoints(INITIAL_WALL_POINTS);
+    setWallsClosed(true);
+    setRoofPoints(INITIAL_ROOF_POINTS);
+    setRoofClosed(true);
+    setWallHeights([9, 9, 9, 9]);
+    setRoofBase(10);
     setPitch(6);
-    setSelectedEdge(1);
-    setSelectedPlane("east-plane");
-    setShowWalls(true);
-    setShowDatums(true);
-    setShowTopology(true);
+    setRoofKind("hip");
+    setRelationships(
+      INITIAL_ROOF_POINTS.map((_, index) => ({
+        wallIndex: index,
+        conditionId: "rafter-seat",
+        overhang: 1.5,
+      })),
+    );
+    setSelection(null);
+    setCommand("select");
+    setPointerWorld(null);
     setOrbit({ yaw: -42, pitch: 24 });
-    setSelected3DWall(null);
-    setWallHeightDraft("9.00");
-    setWallHandlePosition(null);
-    setEaveCatalog(INITIAL_EAVE_CONDITIONS);
-    setEdgeEaveIds([
-      "rafter-seat",
-      "rafter-seat",
-      "rafter-seat",
-      "rafter-seat",
-    ]);
-    setSelected3DEave(null);
-    setShowEaveCreator(false);
-    setSelectedCatalogId(null);
   };
 
-  const setSelectedPlateHeight = (value: number) => {
-    setPlateHeights((current) =>
-      current.map((height, index) => (index === selectedEdge ? value : height)),
-    );
-  };
-
-  const commitWallHeight = () => {
-    if (selected3DWall === null) return;
-    const parsedHeight = Number(wallHeightDraft);
-    if (!wallHeightDraft.trim() || !Number.isFinite(parsedHeight)) {
-      setWallHeightDraft(plateHeights[selected3DWall].toFixed(2));
-      return;
-    }
-    const nextHeight = Math.max(6, Math.min(30, parsedHeight));
-    setPlateHeights((current) =>
-      current.map((height, index) =>
-        index === selected3DWall ? nextHeight : height,
+  const updateWallHeight = (index: number, value: number) => {
+    const safeValue = Math.max(4, Math.min(30, value));
+    setWallHeights((current) =>
+      current.map((height, wallIndex) =>
+        wallIndex === index ? safeValue : height,
       ),
     );
-    setWallHeightDraft(nextHeight.toFixed(2));
+    setWallHeightDraft(safeValue.toFixed(2));
   };
 
-  const setAllPlateHeights = (value: number) => {
-    setPlateHeights([value, value, value, value]);
-  };
-
-  const assignEaveCondition = (edge: number, conditionId: string) => {
-    const condition = eaveCatalog.find((item) => item.id === conditionId);
-    if (!condition) return;
-    setEdgeEaveIds((current) =>
-      current.map((id, index) => (index === edge ? conditionId : id)),
-    );
-    setBearingOffsets((current) =>
-      current.map((offset, index) =>
-        index === edge ? condition.height : offset,
-      ),
-    );
-    setBearingInsets((current) =>
-      current.map((inset, index) =>
-        index === edge ? condition.inset : inset,
+  const updateRelationship = (
+    edgeIndex: number,
+    changes: Partial<EdgeRelationship>,
+  ) => {
+    setRelationships((current) =>
+      current.map((relationship, index) =>
+        index === edgeIndex
+          ? { ...relationship, ...changes }
+          : relationship,
       ),
     );
   };
 
-  const saveEaveCondition = () => {
-    const safeHeight = Number.isFinite(eaveDraft.height)
-      ? eaveDraft.height
-      : 0;
-    const safeInset = Number.isFinite(eaveDraft.inset) ? eaveDraft.inset : 0;
+  const openCatalog = (condition: EaveCondition) => {
+    setSelection({ kind: "catalog", id: condition.id });
+    setCatalogDraft({
+      name: condition.name,
+      driver: condition.driver,
+      height: condition.height,
+      inset: condition.inset,
+    });
+  };
+
+  const saveNewCondition = () => {
     const condition: EaveCondition = {
       id: `eave-${Date.now()}`,
-      name: eaveDraft.name.trim() || "Untitled eave",
-      driver: eaveDraft.driver,
-      height: Math.max(0, Math.min(6, safeHeight)),
-      inset: Math.max(-2, Math.min(4, safeInset)),
+      name: newCatalogDraft.name.trim() || "Untitled eave",
+      driver: newCatalogDraft.driver,
+      height: Math.max(0, Math.min(6, newCatalogDraft.height)),
+      inset: Math.max(-2, Math.min(4, newCatalogDraft.inset)),
     };
     setEaveCatalog((current) => [...current, condition]);
-    setShowEaveCreator(false);
-    setSelectedCatalogId(condition.id);
-    setSelected3DWall(null);
-    setSelected3DEave(null);
-    setCatalogEditDraft({
-      name: condition.name,
-      driver: condition.driver,
-      height: condition.height,
-      inset: condition.inset,
-    });
+    setShowCatalogCreator(false);
+    openCatalog(condition);
   };
 
-  const openCatalogInspector = (condition: EaveCondition) => {
-    setSelectedCatalogId(condition.id);
-    setSelected3DWall(null);
-    setSelected3DEave(null);
-    setCatalogEditDraft({
-      name: condition.name,
-      driver: condition.driver,
-      height: condition.height,
-      inset: condition.inset,
-    });
-  };
-
-  const updateCatalogCondition = () => {
-    if (!selectedCatalogId) return;
-    const safeHeight = Number.isFinite(catalogEditDraft.height)
-      ? Math.max(0, Math.min(6, catalogEditDraft.height))
-      : 0;
-    const safeInset = Number.isFinite(catalogEditDraft.inset)
-      ? Math.max(-2, Math.min(4, catalogEditDraft.inset))
-      : 0;
-    const updatedCondition = {
-      name: catalogEditDraft.name.trim() || "Untitled eave",
-      driver: catalogEditDraft.driver,
-      height: safeHeight,
-      inset: safeInset,
-    };
+  const updateCatalog = () => {
+    if (selection?.kind !== "catalog") return;
     setEaveCatalog((current) =>
       current.map((condition) =>
-        condition.id === selectedCatalogId
-          ? { ...condition, ...updatedCondition }
+        condition.id === selection.id
+          ? {
+              ...condition,
+              name: catalogDraft.name.trim() || "Untitled eave",
+              driver: catalogDraft.driver,
+              height: Math.max(0, Math.min(6, catalogDraft.height)),
+              inset: Math.max(-2, Math.min(4, catalogDraft.inset)),
+            }
           : condition,
       ),
     );
-    setBearingOffsets((current) =>
-      current.map((offset, index) =>
-        edgeEaveIds[index] === selectedCatalogId ? safeHeight : offset,
-      ),
-    );
-    setBearingInsets((current) =>
-      current.map((inset, index) =>
-        edgeEaveIds[index] === selectedCatalogId ? safeInset : inset,
-      ),
-    );
-    setCatalogEditDraft((current) => ({
-      ...current,
-      name: updatedCondition.name,
-      height: safeHeight,
-      inset: safeInset,
-    }));
   };
 
-  const deleteCatalogCondition = () => {
-    if (!selectedCatalogId || eaveCatalog.length <= 1) return;
+  const deleteCatalog = () => {
+    if (selection?.kind !== "catalog" || eaveCatalog.length <= 1) return;
     const fallback = eaveCatalog.find(
-      (condition) => condition.id !== selectedCatalogId,
+      (condition) => condition.id !== selection.id,
     );
     if (!fallback) return;
-    setEdgeEaveIds((current) =>
-      current.map((id) => (id === selectedCatalogId ? fallback.id : id)),
-    );
-    setBearingOffsets((current) =>
-      current.map((offset, index) =>
-        edgeEaveIds[index] === selectedCatalogId ? fallback.height : offset,
-      ),
-    );
-    setBearingInsets((current) =>
-      current.map((inset, index) =>
-        edgeEaveIds[index] === selectedCatalogId ? fallback.inset : inset,
+    setRelationships((current) =>
+      current.map((relationship) =>
+        relationship.conditionId === selection.id
+          ? { ...relationship, conditionId: fallback.id }
+          : relationship,
       ),
     );
     setEaveCatalog((current) =>
-      current.filter((condition) => condition.id !== selectedCatalogId),
+      current.filter((condition) => condition.id !== selection.id),
     );
-    setSelectedCatalogId(null);
-  };
-
-  const setAuthoredPitch = (value: number) => {
-    setPitch(value);
-    if (roofKind === "shed") {
-      setPlateHeights((current) =>
-        current.map((height, index) =>
-          index === 1
-            ? current[3] +
-              bearingOffsets[3] +
-              (bearingInsets[1] - bearingInsets[3]) * (value / 12) +
-              buildingWidth * (value / 12) -
-              bearingOffsets[1]
-            : height,
-        ),
-      );
-    }
+    setSelection(null);
   };
 
   const drawPlan = useCallback(() => {
@@ -746,159 +478,173 @@ export default function Home() {
     const ready = prepareCanvas(canvas);
     if (!ready) return;
     const { context, width, height } = ready;
-    drawGrid(context, width, height);
+    const scale = Math.max(6, Math.min(width / 68, height / 52));
+    const centerX = width / 2;
+    const centerY = height / 2;
+    planScaleRef.current = { scale, centerX, centerY };
+    const project = (point: Point2): ScreenPoint => ({
+      x: centerX + point.x * scale,
+      y: centerY + point.z * scale,
+    });
 
-    const margin = 64;
-    const roofWidth = buildingWidth + overhangs[3] + overhangs[1];
-    const roofDepth = buildingDepth + overhangs[0] + overhangs[2];
-    const scale = Math.min(
-      (width - margin * 2) / roofWidth,
-      (height - margin * 2) / roofDepth,
-    );
-    const rectWidth = buildingWidth * scale;
-    const rectHeight = buildingDepth * scale;
-    const roofLeft = (width - roofWidth * scale) / 2;
-    const roofTop = (height - roofDepth * scale) / 2;
-    const left = roofLeft + overhangs[3] * scale;
-    const top = roofTop + overhangs[0] * scale;
-    const right = left + rectWidth;
-    const bottom = top + rectHeight;
-    const middle = (top + bottom) / 2;
-    const roofRight = right + overhangs[1] * scale;
-    const roofBottom = bottom + overhangs[2] * scale;
-
-    context.fillStyle = "#f8f5ee";
-    context.fillRect(left, top, rectWidth, rectHeight);
-
-    const roofEdges = [
-      [{ x: roofLeft, y: roofTop }, { x: roofRight, y: roofTop }],
-      [{ x: roofRight, y: roofTop }, { x: roofRight, y: roofBottom }],
-      [{ x: roofRight, y: roofBottom }, { x: roofLeft, y: roofBottom }],
-      [{ x: roofLeft, y: roofBottom }, { x: roofLeft, y: roofTop }],
-    ];
-    roofEdges.forEach((edge, index) => {
-      context.strokeStyle = index === selectedEdge ? "#16838a" : "#d97834";
-      context.lineWidth = index === selectedEdge ? 3.5 : 2;
+    context.fillStyle = "#fbfaf7";
+    context.fillRect(0, 0, width, height);
+    const gridStep = scale * 2;
+    context.strokeStyle = "#e9e6df";
+    context.lineWidth = 1;
+    for (
+      let x = ((centerX % gridStep) + gridStep) % gridStep;
+      x < width;
+      x += gridStep
+    ) {
       context.beginPath();
-      context.moveTo(edge[0].x, edge[0].y);
-      context.lineTo(edge[1].x, edge[1].y);
+      context.moveTo(x, 0);
+      context.lineTo(x, height);
+      context.stroke();
+    }
+    for (
+      let y = ((centerY % gridStep) + gridStep) % gridStep;
+      y < height;
+      y += gridStep
+    ) {
+      context.beginPath();
+      context.moveTo(0, y);
+      context.lineTo(width, y);
+      context.stroke();
+    }
+
+    if (roofPoints.length >= 3 && roofClosed) {
+      drawPolygon(
+        context,
+        roofPoints.map(project),
+        "rgba(217, 119, 53, 0.07)",
+        "rgba(217, 119, 53, 0.25)",
+        1,
+      );
+    }
+
+    roofEdges.forEach((edge) => {
+      const start = project(edge.start);
+      const end = project(edge.end);
+      const selected =
+        selection?.kind === "roof-edge" && selection.index === edge.index;
+      context.strokeStyle = selected ? "#16838a" : "#d97834";
+      context.lineWidth = selected ? 4 : 2.5;
+      context.lineCap = "round";
+      context.beginPath();
+      context.moveTo(start.x, start.y);
+      context.lineTo(end.x, end.y);
+      context.stroke();
+      const edgeMidpoint = {
+        x: (start.x + end.x) / 2,
+        y: (start.y + end.y) / 2,
+      };
+      context.fillStyle = selected ? "#16838a" : "#fff";
+      context.beginPath();
+      context.arc(edgeMidpoint.x, edgeMidpoint.y, 5, 0, Math.PI * 2);
+      context.fill();
+      context.strokeStyle = selected ? "#16838a" : "#d97834";
+      context.lineWidth = 1;
       context.stroke();
     });
 
-    const edges = [
-      [{ x: left, y: top }, { x: right, y: top }],
-      [{ x: right, y: top }, { x: right, y: bottom }],
-      [{ x: right, y: bottom }, { x: left, y: bottom }],
-      [{ x: left, y: bottom }, { x: left, y: top }],
-    ];
-    edges.forEach((edge, index) => {
-      context.strokeStyle = index === selectedEdge ? "#171512" : "#8a837a";
-      context.lineWidth = index === selectedEdge ? 8 : 5;
+    if (command === "roof" && roofPoints.length) {
+      const projected = roofPoints.map(project);
+      context.strokeStyle = "#d97834";
+      context.lineWidth = 2.5;
+      context.beginPath();
+      context.moveTo(projected[0].x, projected[0].y);
+      projected.slice(1).forEach((point) => context.lineTo(point.x, point.y));
+      if (pointerWorld) {
+        const pointer = project(pointerWorld);
+        context.setLineDash([6, 5]);
+        context.lineTo(pointer.x, pointer.y);
+        context.setLineDash([]);
+      }
+      context.stroke();
+    }
+
+    walls.forEach((wall) => {
+      const start = project(wall.start);
+      const end = project(wall.end);
+      const selected =
+        selection?.kind === "wall" && selection.index === wall.index;
+      context.strokeStyle = selected ? "#171512" : "#817a71";
+      context.lineWidth = selected ? 8 : 5;
       context.lineCap = "round";
       context.beginPath();
-      context.moveTo(edge[0].x, edge[0].y);
-      context.lineTo(edge[1].x, edge[1].y);
+      context.moveTo(start.x, start.y);
+      context.lineTo(end.x, end.y);
       context.stroke();
+      const wallMidpoint = {
+        x: (start.x + end.x) / 2,
+        y: (start.y + end.y) / 2,
+      };
+      context.fillStyle = selected ? "#171512" : "#fff";
       context.beginPath();
-      context.arc(
-        (edge[0].x + edge[1].x) / 2,
-        (edge[0].y + edge[1].y) / 2,
-        9,
-        0,
-        Math.PI * 2,
-      );
-      context.fillStyle = index === selectedEdge ? "#171512" : "#fff";
+      context.arc(wallMidpoint.x, wallMidpoint.y, 6.5, 0, Math.PI * 2);
       context.fill();
       context.strokeStyle = "#171512";
       context.lineWidth = 1;
       context.stroke();
-
-      const midpointX = (edge[0].x + edge[1].x) / 2;
-      const midpointY = (edge[0].y + edge[1].y) / 2;
-      const offsets = [
-        { x: 0, y: -21 },
-        { x: 25, y: 3 },
-        { x: 0, y: 27 },
-        { x: -25, y: 3 },
-      ];
-      context.fillStyle = index === selectedEdge ? "#171512" : "#716a61";
-      context.font = "600 9px monospace";
+      context.fillStyle = selected ? "#171512" : "#716a61";
+      context.font = "600 8px monospace";
       context.textAlign = "center";
       context.fillText(
-        feetInches(plateHeights[index]),
-        midpointX + offsets[index].x,
-        midpointY + offsets[index].y,
+        `W${wall.index + 1} · ${feetInches(wallHeights[wall.index] ?? 9)}`,
+        wallMidpoint.x,
+        wallMidpoint.y - 13,
       );
     });
 
-    context.strokeStyle = "#d97834";
-    context.lineWidth = 2;
-    context.beginPath();
-    if (!roofResolved) {
-      context.setLineDash([7, 5]);
-      context.strokeRect(left + 9, top + 9, rectWidth - 18, rectHeight - 18);
-      context.setLineDash([]);
-      context.fillStyle = "#b45427";
-      context.font = "700 9px monospace";
-      context.textAlign = "center";
-      context.fillText("UNRESOLVED SUPPORTS", width / 2, middle);
-    } else if (roofKind === "gable") {
-      const ridgePlanX =
-        left + ((gableSolution.ridgeX + buildingWidth / 2) / buildingWidth) * rectWidth;
-      context.moveTo(ridgePlanX, roofTop);
-      context.lineTo(ridgePlanX, roofBottom);
-    } else if (roofKind === "hip") {
-      makeRoofFaces(
-        roofKind,
-        buildingWidth,
-        buildingDepth,
-        bearingElevations,
-        overhangs,
-        effectivePitch,
-        true,
-      ).forEach((face) => {
-        const points = face.points.map((point) => ({
-          x: left + ((point.x + buildingWidth / 2) / buildingWidth) * rectWidth,
-          y: top + ((point.z + buildingDepth / 2) / buildingDepth) * rectHeight,
-        }));
-        context.beginPath();
-        context.moveTo(points[0].x, points[0].y);
-        points.slice(1).forEach((point) => context.lineTo(point.x, point.y));
-        context.closePath();
-        context.stroke();
-      });
-    } else {
-      context.moveTo(left + rectWidth * 0.25, middle);
-      context.lineTo(right - rectWidth * 0.2, middle);
-      context.lineTo(right - rectWidth * 0.28, middle - 6);
-      context.moveTo(right - rectWidth * 0.2, middle);
-      context.lineTo(right - rectWidth * 0.28, middle + 6);
+    if (command === "walls" && wallPoints.length) {
+      const projected = wallPoints.map(project);
+      context.strokeStyle = "#171512";
+      context.lineWidth = 5;
+      context.lineCap = "round";
+      context.beginPath();
+      context.moveTo(projected[0].x, projected[0].y);
+      projected.slice(1).forEach((point) => context.lineTo(point.x, point.y));
+      if (pointerWorld) {
+        const pointer = project(pointerWorld);
+        context.setLineDash([6, 5]);
+        context.lineTo(pointer.x, pointer.y);
+        context.setLineDash([]);
+      }
+      context.stroke();
     }
-    context.stroke();
 
-    context.fillStyle = "#615b52";
-    context.font = "500 10px monospace";
-    context.textAlign = "center";
-    context.fillText(feetInches(buildingWidth), width / 2, bottom + 45);
-    context.save();
-    context.translate(left - 34, height / 2);
-    context.rotate(-Math.PI / 2);
-    context.fillText(feetInches(buildingDepth), 0, 0);
-    context.restore();
+    const authoredPoints =
+      command === "walls"
+        ? wallPoints
+        : command === "roof"
+          ? roofPoints
+          : [];
+    authoredPoints.forEach((point, index) => {
+      const projected = project(point);
+      context.beginPath();
+      context.arc(projected.x, projected.y, index === 0 ? 7 : 4.5, 0, Math.PI * 2);
+      context.fillStyle = index === 0 ? "#16838a" : "#fff";
+      context.fill();
+      context.strokeStyle = index === 0 ? "#16838a" : "#171512";
+      context.lineWidth = 1.5;
+      context.stroke();
+    });
+
     context.textAlign = "left";
+    context.fillStyle = "#716a61";
+    context.font = "600 8px monospace";
+    context.fillText("2′ GRID", 14, 22);
   }, [
-    buildingDepth,
-    buildingWidth,
-    bearingElevations,
-    bearingInsets,
-    bearingOffsets,
-    effectivePitch,
-    gableSolution.ridgeX,
-    plateHeights,
-    overhangs,
-    roofKind,
-    roofResolved,
-    selectedEdge,
+    command,
+    pointerWorld,
+    roofClosed,
+    roofEdges,
+    roofPoints,
+    selection,
+    wallHeights,
+    wallPoints,
+    walls,
   ]);
 
   const drawForm = useCallback(() => {
@@ -907,81 +653,82 @@ export default function Home() {
     const ready = prepareCanvas(canvas);
     if (!ready) return;
     const { context, width, height } = ready;
-    const origin = { x: width * 0.5, y: height * 0.53 };
-    const scale = Math.min(width / 70, height / 46);
     const yaw = (orbit.yaw * Math.PI) / 180;
     const cameraPitch = (orbit.pitch * Math.PI) / 180;
-    const pivotY = ridgeElevation / 2;
-    const project = (point: Point3) => {
-      const horizontal = point.x * Math.cos(yaw) - point.z * Math.sin(yaw);
-      const depth = point.x * Math.sin(yaw) + point.z * Math.cos(yaw);
-      const vertical = point.y - pivotY;
+    const maxHeight = Math.max(roofBase, ...wallHeights, 10) + 8;
+    const allPoints = [...wallPoints, ...roofPoints];
+    const spread = Math.max(
+      34,
+      ...allPoints.map((point) =>
+        Math.hypot(point.x - center.x, point.z - center.z),
+      ),
+    );
+    const scale = Math.min(width / (spread * 2.5), height / (maxHeight * 2.4));
+    const origin = { x: width * 0.5, y: height * 0.59 };
+    const pivotY = maxHeight * 0.38;
+    const project = (point: Point3): ScreenPoint => {
+      const localX = point.x - center.x;
+      const localZ = point.z - center.z;
+      const horizontal = localX * Math.cos(yaw) - localZ * Math.sin(yaw);
+      const depth = localX * Math.sin(yaw) + localZ * Math.cos(yaw);
       return {
         x: origin.x + horizontal * scale,
         y:
           origin.y +
           depth * scale * Math.sin(cameraPitch) -
-          vertical * scale * Math.cos(cameraPitch),
+          (point.y - pivotY) * scale * Math.cos(cameraPitch),
       };
     };
 
     context.fillStyle = "#fbfaf7";
     context.fillRect(0, 0, width, height);
-    const w = buildingWidth / 2;
-    const d = buildingDepth / 2;
-    const groundHalfExtent =
-      Math.ceil((Math.max(buildingWidth, buildingDepth) * 0.75) / 4) * 4;
-    const groundElevation = -0.04;
-    const groundCorners: Point3[] = [
-      { x: -groundHalfExtent, y: groundElevation, z: -groundHalfExtent },
-      { x: groundHalfExtent, y: groundElevation, z: -groundHalfExtent },
-      { x: groundHalfExtent, y: groundElevation, z: groundHalfExtent },
-      { x: -groundHalfExtent, y: groundElevation, z: groundHalfExtent },
-    ];
 
+    const groundExtent = Math.ceil((spread + 12) / 4) * 4;
+    const groundCorners: Point3[] = [
+      { x: center.x - groundExtent, y: -0.04, z: center.z - groundExtent },
+      { x: center.x + groundExtent, y: -0.04, z: center.z - groundExtent },
+      { x: center.x + groundExtent, y: -0.04, z: center.z + groundExtent },
+      { x: center.x - groundExtent, y: -0.04, z: center.z + groundExtent },
+    ];
     drawPolygon(
       context,
       groundCorners.map(project),
       "rgba(22, 131, 138, 0.045)",
-      "rgba(22, 131, 138, 0.18)",
-      1,
+      "rgba(22, 131, 138, 0.16)",
     );
-
     for (
-      let coordinate = -groundHalfExtent;
-      coordinate <= groundHalfExtent;
+      let coordinate = -groundExtent;
+      coordinate <= groundExtent;
       coordinate += 4
     ) {
-      const isCenterAxis = coordinate === 0;
-      context.strokeStyle = isCenterAxis
-        ? "rgba(22, 131, 138, 0.34)"
-        : "rgba(113, 106, 97, 0.17)";
-      context.lineWidth = isCenterAxis ? 1.35 : 0.75;
-
+      const axis = coordinate === 0;
+      context.strokeStyle = axis
+        ? "rgba(22, 131, 138, 0.35)"
+        : "rgba(113, 106, 97, 0.16)";
+      context.lineWidth = axis ? 1.3 : 0.75;
       const xStart = project({
-        x: coordinate,
-        y: groundElevation,
-        z: -groundHalfExtent,
+        x: center.x + coordinate,
+        y: 0,
+        z: center.z - groundExtent,
       });
       const xEnd = project({
-        x: coordinate,
-        y: groundElevation,
-        z: groundHalfExtent,
+        x: center.x + coordinate,
+        y: 0,
+        z: center.z + groundExtent,
       });
       context.beginPath();
       context.moveTo(xStart.x, xStart.y);
       context.lineTo(xEnd.x, xEnd.y);
       context.stroke();
-
       const zStart = project({
-        x: -groundHalfExtent,
-        y: groundElevation,
-        z: coordinate,
+        x: center.x - groundExtent,
+        y: 0,
+        z: center.z + coordinate,
       });
       const zEnd = project({
-        x: groundHalfExtent,
-        y: groundElevation,
-        z: coordinate,
+        x: center.x + groundExtent,
+        y: 0,
+        z: center.z + coordinate,
       });
       context.beginPath();
       context.moveTo(zStart.x, zStart.y);
@@ -989,515 +736,362 @@ export default function Home() {
       context.stroke();
     }
 
-    const roofHeightAtX = (x: number) => {
-      if (roofKind === "shed") {
-        const t = (x + w) / buildingWidth;
-        return (
-          bearingElevations[3] +
-          (bearingElevations[1] - bearingElevations[3]) * t
-        );
-      }
-      if (x <= gableSolution.ridgeX) {
-        return (
-          bearingElevations[3] +
-          (x + w) * (Math.max(effectivePitch, 0.001) / 12)
-        );
-      }
-      return (
-        bearingElevations[1] +
-        (w - x) * (Math.max(effectivePitch, 0.001) / 12)
-      );
-    };
-    const endWall = (edge: 0 | 2) => {
-      const z = edge === 0 ? -d : d;
-      const wallHeight = plateHeights[edge];
-      const top: Point3[] = [];
-      for (let index = 0; index <= 16; index += 1) {
-        const x = w - (index / 16) * buildingWidth;
-        const clippedHeight =
-          roofResolved && roofKind !== "hip"
-            ? Math.min(wallHeight, roofHeightAtX(x))
-            : wallHeight;
-        top.push({ x, y: clippedHeight, z });
-      }
-      return [
-        { x: -w, y: 0, z },
-        { x: w, y: 0, z },
-        ...top,
-      ];
-    };
-
     formWallRegions.current = [];
     if (showWalls) {
-      const wallFaces = [
-        {
-          edge: 0,
-          points: endWall(0),
-        },
-        {
-          edge: 1,
-          points: [
-            { x: w, y: 0, z: -d },
-            { x: w, y: plateHeights[1], z: -d },
-            { x: w, y: plateHeights[1], z: d },
-            { x: w, y: 0, z: d },
-          ],
-        },
-        {
-          edge: 2,
-          points: endWall(2),
-        },
-        {
-          edge: 3,
-          points: [
-            { x: -w, y: 0, z: d },
-            { x: -w, y: plateHeights[3], z: d },
-            { x: -w, y: plateHeights[3], z: -d },
-            { x: -w, y: 0, z: -d },
-          ],
-        },
-      ];
-      const orderedWallFaces = wallFaces.sort((a, b) => {
-          const centerA = a.points.reduce(
-            (sum, point) =>
-              sum + point.x * Math.sin(yaw) + point.z * Math.cos(yaw),
-            0,
-          );
-          const centerB = b.points.reduce(
-            (sum, point) =>
-              sum + point.x * Math.sin(yaw) + point.z * Math.cos(yaw),
-            0,
-          );
-          return centerA - centerB;
-        });
-      formWallRegions.current = orderedWallFaces.map((face) => ({
-        edge: face.edge,
-        points: face.points.map(project),
-      }));
-      orderedWallFaces.forEach((face) => {
-        const selected = face.edge === selected3DWall;
+      const orderedWalls = [...walls].sort((a, b) => {
+        const aMid = midpoint(a.start, a.end);
+        const bMid = midpoint(b.start, b.end);
+        const aDepth =
+          (aMid.x - center.x) * Math.sin(yaw) +
+          (aMid.z - center.z) * Math.cos(yaw);
+        const bDepth =
+          (bMid.x - center.x) * Math.sin(yaw) +
+          (bMid.z - center.z) * Math.cos(yaw);
+        return aDepth - bDepth;
+      });
+      orderedWalls.forEach((wall) => {
+        const height = wallHeights[wall.index] ?? 9;
+        const face = [
+          { x: wall.start.x, y: 0, z: wall.start.z },
+          { x: wall.end.x, y: 0, z: wall.end.z },
+          { x: wall.end.x, y: height, z: wall.end.z },
+          { x: wall.start.x, y: height, z: wall.start.z },
+        ];
+        const projected = face.map(project);
+        formWallRegions.current.push({ index: wall.index, points: projected });
+        const selectedWall =
+          selection?.kind === "wall" && selection.index === wall.index;
         drawPolygon(
           context,
-          face.points.map(project),
-          selected ? "#d7e7e5" : "#ded9cf",
-          selected ? "#16838a" : "#aaa399",
-          selected ? 2.5 : 1,
+          projected,
+          selectedWall ? "#d7e7e5" : "#ded9cf",
+          selectedWall ? "#16838a" : "#aaa399",
+          selectedWall ? 2.5 : 1,
         );
       });
     }
 
-    if (showWalls && selected3DWall !== null) {
-      const selectedHeight =
-        (selected3DWall === 0 || selected3DWall === 2) &&
-        roofResolved &&
-        roofKind !== "hip"
-          ? Math.min(plateHeights[selected3DWall], roofHeightAtX(0))
-          : plateHeights[selected3DWall];
-      const handlePoint: Point3 =
-        selected3DWall === 0
-          ? { x: 0, y: selectedHeight, z: -d }
-          : selected3DWall === 1
-            ? { x: w, y: selectedHeight, z: 0 }
-            : selected3DWall === 2
-              ? { x: 0, y: selectedHeight, z: d }
-              : { x: -w, y: selectedHeight, z: 0 };
-      const projectedHandle = project(handlePoint);
-      setWallHandlePosition((current) =>
-        current &&
-        Math.abs(current.x - projectedHandle.x) < 0.25 &&
-        Math.abs(current.y - projectedHandle.y) < 0.25
-          ? current
-          : projectedHandle,
-      );
+    if (selection?.kind === "wall") {
+      const wall = walls.find((segment) => segment.index === selection.index);
+      if (wall) {
+        const wallMidpoint = midpoint(wall.start, wall.end);
+        const projected = project({
+          x: wallMidpoint.x,
+          y: wallHeights[wall.index] ?? 9,
+          z: wallMidpoint.z,
+        });
+        setWallHandlePosition((current) =>
+          current &&
+          Math.abs(current.x - projected.x) < 0.25 &&
+          Math.abs(current.y - projected.y) < 0.25
+            ? current
+            : projected,
+        );
+      }
     } else {
       setWallHandlePosition((current) => (current ? null : current));
     }
 
-    const faces = makeRoofFaces(
-      roofKind,
-      buildingWidth,
-      buildingDepth,
-      bearingElevations,
-      overhangs,
-      effectivePitch,
-      roofResolved,
-    ).sort(
-      (a, b) =>
-        a.points.reduce(
+    formEaveRegions.current = [];
+    if (roofClosed && roofPoints.length >= 3) {
+      const averageRadius =
+        roofPoints.reduce(
           (sum, point) =>
-            sum + point.x * Math.sin(yaw) + point.z * Math.cos(yaw),
+            sum + Math.hypot(point.x - center.x, point.z - center.z),
           0,
-        ) /
-          a.points.length -
-        b.points.reduce(
-          (sum, point) =>
-            sum + point.x * Math.sin(yaw) + point.z * Math.cos(yaw),
-          0,
-        ) /
-          b.points.length,
-    );
-
-    faces.forEach((face) => {
-      const selected = face.id === selectedPlane;
-      drawPolygon(
-        context,
-        face.points.map(project),
-        selected ? "#d97834" : face.color,
-        selected ? "#171512" : "#9b572c",
-        selected ? 2.5 : 1,
+        ) / roofPoints.length;
+      const highestBase = Math.max(...vertexBaseElevations, roofBase);
+      const rise = Math.max(2, averageRadius * (pitch / 12));
+      const bounds = roofPoints.reduce(
+        (result, point) => ({
+          minX: Math.min(result.minX, point.x),
+          maxX: Math.max(result.maxX, point.x),
+          minZ: Math.min(result.minZ, point.z),
+          maxZ: Math.max(result.maxZ, point.z),
+        }),
+        {
+          minX: Number.POSITIVE_INFINITY,
+          maxX: Number.NEGATIVE_INFINITY,
+          minZ: Number.POSITIVE_INFINITY,
+          maxZ: Number.NEGATIVE_INFINITY,
+        },
       );
-    });
-
-    if (showTopology) {
-      faces.forEach((face) =>
-        drawPolygon(
-          context,
-          face.points.map(project),
-          "rgba(255,255,255,0)",
-          "#63371f",
-          1.2,
-        ),
-      );
-    }
-
-    const westExtent = -w - overhangs[3];
-    const eastExtent = w + overhangs[1];
-    const northExtent = -d - overhangs[0];
-    const southExtent = d + overhangs[2];
-    const roofSurfaceHeight = (x: number, z: number) =>
-      roofKind === "hip"
-        ? hipRoofHeight(
-            x,
-            z,
-            w,
-            d,
-            bearingElevations,
-            effectivePitch,
-          )
-        : roofHeightAtX(x);
-    const northSouthBreaks =
-      roofKind === "gable"
-        ? [westExtent, gableSolution.ridgeX, eastExtent]
-        : [westExtent, eastExtent];
-    const eaveEdges: { edge: number; points: Point3[] }[] = [
-      {
-        edge: 0,
-        points: northSouthBreaks.map((x) => ({
-          x,
-          y: roofSurfaceHeight(x, northExtent),
-          z: northExtent,
-        })),
-      },
-      {
-        edge: 1,
-        points: [
-          {
-            x: eastExtent,
-            y: roofSurfaceHeight(eastExtent, northExtent),
-            z: northExtent,
-          },
-          {
-            x: eastExtent,
-            y: roofSurfaceHeight(eastExtent, southExtent),
-            z: southExtent,
-          },
-        ],
-      },
-      {
-        edge: 2,
-        points: [...northSouthBreaks].reverse().map((x) => ({
-          x,
-          y: roofSurfaceHeight(x, southExtent),
-          z: southExtent,
-        })),
-      },
-      {
-        edge: 3,
-        points: [
-          {
-            x: westExtent,
-            y: roofSurfaceHeight(westExtent, southExtent),
-            z: southExtent,
-          },
-          {
-            x: westExtent,
-            y: roofSurfaceHeight(westExtent, northExtent),
-            z: northExtent,
-          },
-        ],
-      },
-    ];
-    formEaveRegions.current = eaveEdges.map((edge) => ({
-      edge: edge.edge,
-      points: edge.points.map(project),
-    }));
-    formEaveRegions.current.forEach((edge) => {
-      context.strokeStyle =
-        edge.edge === selected3DEave ? "#16838a" : "#a95829";
-      context.lineWidth = edge.edge === selected3DEave ? 4 : 2;
-      context.lineCap = "round";
-      context.beginPath();
-      context.moveTo(edge.points[0].x, edge.points[0].y);
-      edge.points
-        .slice(1)
-        .forEach((point) => context.lineTo(point.x, point.y));
-      context.stroke();
-    });
-
-    if (!roofResolved) {
-      context.fillStyle = "#b45427";
-      context.font = "700 10px monospace";
-      context.fillText("ROOF FORM UNRESOLVED", 18, 44);
-      context.fillStyle = "#716a61";
-      context.font = "500 9px monospace";
-      context.fillText("Bearing rails do not define one continuous solid.", 18, 60);
-    }
-
-    if (showDatums) {
-      const edgePoints = (
-        edge: number,
-        elevation: number,
-        inset = 0,
-      ): Point3[] => {
-        if (edge === 0)
-          return [
-            { x: -w, y: elevation, z: -d + inset },
-            { x: w, y: elevation, z: -d + inset },
-          ];
-        if (edge === 1)
-          return [
-            { x: w - inset, y: elevation, z: -d },
-            { x: w - inset, y: elevation, z: d },
-          ];
-        if (edge === 2)
-          return [
-            { x: w, y: elevation, z: d - inset },
-            { x: -w, y: elevation, z: d - inset },
-          ];
-        return [
-          { x: -w + inset, y: elevation, z: d },
-          { x: -w + inset, y: elevation, z: -d },
-        ];
+      const dominantX = bounds.maxX - bounds.minX >= bounds.maxZ - bounds.minZ;
+      const ridgeA: Point3 = dominantX
+        ? {
+            x: bounds.minX + (bounds.maxX - bounds.minX) * 0.28,
+            y: highestBase + rise,
+            z: center.z,
+          }
+        : {
+            x: center.x,
+            y: highestBase + rise,
+            z: bounds.minZ + (bounds.maxZ - bounds.minZ) * 0.28,
+          };
+      const ridgeB: Point3 = dominantX
+        ? {
+            x: bounds.maxX - (bounds.maxX - bounds.minX) * 0.28,
+            y: highestBase + rise,
+            z: center.z,
+          }
+        : {
+            x: center.x,
+            y: highestBase + rise,
+            z: bounds.maxZ - (bounds.maxZ - bounds.minZ) * 0.28,
+          };
+      const peak: Point3 = {
+        x: center.x,
+        y:
+          roofKind === "shed"
+            ? vertexBaseElevations.reduce((sum, value) => sum + value, 0) /
+                vertexBaseElevations.length +
+              rise * 0.45
+            : highestBase + rise,
+        z: center.z,
       };
-      const plateRail = edgePoints(selectedEdge, plateHeights[selectedEdge]).map(project);
-      context.strokeStyle = "#16838a";
-      context.lineWidth = 2.5;
-      context.beginPath();
-      context.moveTo(plateRail[0].x, plateRail[0].y);
-      context.lineTo(plateRail[1].x, plateRail[1].y);
-      context.stroke();
-      context.fillStyle = "#126a70";
-      context.font = "600 10px monospace";
-      context.fillText("WALL TOP / PLATE", plateRail[1].x - 84, plateRail[1].y - 8);
+      const faces = roofEdges.map((edge) => {
+        const startY = vertexBaseElevations[edge.index];
+        const endY =
+          vertexBaseElevations[(edge.index + 1) % vertexBaseElevations.length];
+        let target = peak;
+        if (roofKind === "gable") {
+          const edgeMidpoint = midpoint(edge.start, edge.end);
+          const distanceA = Math.hypot(
+            edgeMidpoint.x - ridgeA.x,
+            edgeMidpoint.z - ridgeA.z,
+          );
+          const distanceB = Math.hypot(
+            edgeMidpoint.x - ridgeB.x,
+            edgeMidpoint.z - ridgeB.z,
+          );
+          target = distanceA < distanceB ? ridgeA : ridgeB;
+        }
+        return {
+          index: edge.index,
+          points: [
+            { x: edge.start.x, y: startY, z: edge.start.z },
+            { x: edge.end.x, y: endY, z: edge.end.z },
+            target,
+          ],
+        };
+      });
+      faces
+        .sort((a, b) => {
+          const depth = (face: { points: Point3[] }) =>
+            face.points.reduce(
+              (sum, point) =>
+                sum +
+                (point.x - center.x) * Math.sin(yaw) +
+                (point.z - center.z) * Math.cos(yaw),
+              0,
+            ) / face.points.length;
+          return depth(a) - depth(b);
+        })
+        .forEach((face, order) => {
+          const selectedEdge =
+            selection?.kind === "roof-edge" &&
+            selection.index === face.index;
+          drawPolygon(
+            context,
+            face.points.map(project),
+            selectedEdge
+              ? "#d97834"
+              : order % 2
+                ? "#ef9e67"
+                : "#df8347",
+            selectedEdge ? "#171512" : "#9b572c",
+            selectedEdge ? 2.5 : 1,
+          );
+        });
 
-      if (selectedDrivesRoof) {
-        const bearingRail = edgePoints(
-          selectedEdge,
-          plateHeights[selectedEdge] + bearingOffsets[selectedEdge],
-          bearingInsets[selectedEdge],
-        ).map(project);
-        context.setLineDash([5, 4]);
-        context.strokeStyle = "#d97834";
-        context.lineWidth = 2;
+      if (showTopology && roofKind === "gable") {
+        context.strokeStyle = "#63371f";
+        context.lineWidth = 1.5;
+        const start = project(ridgeA);
+        const end = project(ridgeB);
         context.beginPath();
-        context.moveTo(bearingRail[0].x, bearingRail[0].y);
-        context.lineTo(bearingRail[1].x, bearingRail[1].y);
+        context.moveTo(start.x, start.y);
+        context.lineTo(end.x, end.y);
         context.stroke();
-        context.setLineDash([]);
-        context.fillStyle = "#a95829";
+      }
+
+      roofEdges.forEach((edge) => {
+        const start = project({
+          x: edge.start.x,
+          y: vertexBaseElevations[edge.index],
+          z: edge.start.z,
+        });
+        const end = project({
+          x: edge.end.x,
+          y:
+            vertexBaseElevations[
+              (edge.index + 1) % vertexBaseElevations.length
+            ],
+          z: edge.end.z,
+        });
+        formEaveRegions.current.push({ index: edge.index, start, end });
+        const selectedEdge =
+          selection?.kind === "roof-edge" && selection.index === edge.index;
+        context.strokeStyle = selectedEdge ? "#16838a" : "#a95829";
+        context.lineWidth = selectedEdge ? 4 : 2;
+        context.lineCap = "round";
+        context.beginPath();
+        context.moveTo(start.x, start.y);
+        context.lineTo(end.x, end.y);
+        context.stroke();
+      });
+
+      if (showDatums) {
+        context.fillStyle = "#126a70";
+        context.font = "600 8px monospace";
         context.fillText(
-          "WALL / ROOF LOCATOR",
-          bearingRail[1].x - 99,
-          bearingRail[1].y - 8,
+          `DEFAULT ROOF BASE · ${feetInches(roofBase)}`,
+          16,
+          24,
         );
       }
+    } else {
+      context.fillStyle = "#a95829";
+      context.font = "700 10px monospace";
+      context.fillText("CLOSE THE ROOF BOUNDARY TO GENERATE VOLUME", 16, 26);
     }
-
-    context.fillStyle = "#25211d";
-    context.font = "600 10px monospace";
-    context.fillText("STRUCTURAL ROOF FORM", 18, 25);
   }, [
-    buildingDepth,
-    buildingWidth,
-    bearingElevations,
-    bearingInsets,
-    bearingOffsets,
-    effectivePitch,
-    gableSolution.ridgeX,
+    center.x,
+    center.z,
     orbit,
-    overhangs,
-    plateHeights,
-    ridgeElevation,
-    roofResolved,
+    pitch,
+    roofBase,
+    roofClosed,
+    roofEdges,
     roofKind,
-    selectedEdge,
-    selectedDrivesRoof,
-    selectedPlane,
-    selected3DWall,
-    selected3DEave,
+    roofPoints,
+    selection,
     showDatums,
     showTopology,
     showWalls,
-  ]);
-
-  const drawSection = useCallback(() => {
-    const canvas = sectionRef.current;
-    if (!canvas) return;
-    const ready = prepareCanvas(canvas);
-    if (!ready) return;
-    const { context, width, height } = ready;
-    const floor = height - 25;
-    const maxElevation = Math.max(
-      ridgeElevation,
-      ...plateHeights,
-      ...bearingElevations,
-    );
-    const sy = (height - 50) / (maxElevation + 1.5);
-    const sx = (width - 58) / (buildingWidth + 10);
-    const x = (value: number) => width / 2 + value * sx;
-    const y = (value: number) => floor - value * sy;
-    const westPlate = plateHeights[3];
-    const eastPlate = plateHeights[1];
-    const westBase = bearingElevations[3];
-    const eastBase = bearingElevations[1];
-
-    context.fillStyle = "#fbfaf7";
-    context.fillRect(0, 0, width, height);
-    context.fillStyle = "#d8d2c8";
-    context.fillRect(
-      x(-buildingWidth / 2),
-      y(westPlate),
-      10,
-      floor - y(westPlate),
-    );
-    context.fillRect(
-      x(buildingWidth / 2) - 10,
-      y(eastPlate),
-      10,
-      floor - y(eastPlate),
-    );
-
-    context.strokeStyle = "#16838a";
-    context.lineWidth = 1.5;
-    context.setLineDash([5, 4]);
-    context.beginPath();
-    context.moveTo(22, y(westPlate));
-    context.lineTo(width / 2 - 5, y(westPlate));
-    context.moveTo(width / 2 + 5, y(eastPlate));
-    context.lineTo(width - 22, y(eastPlate));
-    context.stroke();
-    context.setLineDash([]);
-
-    if (roofResolved) {
-      context.strokeStyle = "#d97834";
-      context.lineWidth = 8;
-      context.lineCap = "round";
-      context.beginPath();
-      context.moveTo(x(-buildingWidth / 2), y(westBase));
-      if (roofKind === "shed") {
-        context.lineTo(x(buildingWidth / 2), y(eastBase));
-      } else if (roofKind === "gable") {
-        context.lineTo(
-          x(gableSolution.ridgeX),
-          y(gableSolution.ridgeElevation),
-        );
-        context.lineTo(x(buildingWidth / 2), y(eastBase));
-      } else {
-        context.beginPath();
-        for (let index = 0; index <= 80; index += 1) {
-          const sectionX =
-            -buildingWidth / 2 + (index / 80) * buildingWidth;
-          const sectionY = hipRoofHeight(
-            sectionX,
-            0,
-            buildingWidth / 2,
-            buildingDepth / 2,
-            bearingElevations,
-            effectivePitch,
-          );
-          if (index === 0) context.moveTo(x(sectionX), y(sectionY));
-          else context.lineTo(x(sectionX), y(sectionY));
-        }
-      }
-      context.stroke();
-    } else {
-      context.fillStyle = "#b45427";
-      context.font = "700 10px monospace";
-      context.fillText("NO CONTINUOUS ROOF SECTION", width / 2 - 83, 28);
-      context.fillStyle = "#716a61";
-      context.font = "500 9px monospace";
-      context.fillText(
-        "Resolve bearing-base elevations before generating the solid.",
-        width / 2 - 151,
-        44,
-      );
-    }
-
-    context.fillStyle = "#126a70";
-    context.font = "600 9px monospace";
-    context.fillText("WEST PLATE", 22, y(westPlate) - 7);
-    context.fillText("EAST PLATE", width - 83, y(eastPlate) - 7);
-    context.fillStyle = "#5c554c";
-    context.fillText(`${effectivePitch.toFixed(1)}:12`, width - 68, 20);
-  }, [
-    bearingElevations,
-    buildingDepth,
-    buildingWidth,
-    effectivePitch,
-    gableSolution.ridgeElevation,
-    gableSolution.ridgeX,
-    plateHeights,
-    ridgeElevation,
-    roofResolved,
-    roofKind,
+    vertexBaseElevations,
+    wallHeights,
+    wallPoints,
+    walls,
   ]);
 
   useEffect(() => {
-    const drawAll = () => {
+    const draw = () => {
       drawPlan();
       drawForm();
-      drawSection();
     };
-    drawAll();
-    window.addEventListener("resize", drawAll);
-    return () => window.removeEventListener("resize", drawAll);
-  }, [drawForm, drawPlan, drawSection, viewMode]);
+    draw();
+    window.addEventListener("resize", draw);
+    return () => window.removeEventListener("resize", draw);
+  }, [drawForm, drawPlan, viewMode]);
 
-  const chooseKind = (kind: RoofKind) => {
-    setRoofKind(kind);
-    setSelectedEdge(kind === "shed" ? 1 : 1);
-    setSelectedPlane(kind === "shed" ? "shed-plane" : "east-plane");
-    if (kind === "shed") {
-      setPlateHeights((current) =>
-        current.map((height, index) =>
-          index === 1
-            ? current[3] +
-              bearingOffsets[3] +
-              (bearingInsets[1] - bearingInsets[3]) * (pitch / 12) +
-              buildingWidth * (pitch / 12) -
-              bearingOffsets[1]
-            : height,
-        ),
-      );
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setCommand("select");
+        setPointerWorld(null);
+      }
+      if (event.key === "Enter" && command === "walls") finishWalls();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
+
+  const handlePlanClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = planRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const { scale, centerX, centerY } = planScaleRef.current;
+    const point = {
+      x: Math.round(((event.clientX - rect.left - centerX) / scale) * 2) / 2,
+      z: Math.round(((event.clientY - rect.top - centerY) / scale) * 2) / 2,
+    };
+
+    if (command === "walls") {
+      if (
+        wallPoints.length >= 3 &&
+        segmentLength(point, wallPoints[0]) <= 1
+      ) {
+        closeWalls();
+        return;
+      }
+      if (
+        wallPoints.length &&
+        segmentLength(point, wallPoints[wallPoints.length - 1]) < 0.25
+      ) {
+        return;
+      }
+      setWallPoints((current) => [...current, point]);
+      if (wallPoints.length > 0) {
+        setWallHeights((current) => [...current, 9]);
+      }
+      return;
+    }
+
+    if (command === "roof") {
+      if (
+        roofPoints.length >= 3 &&
+        segmentLength(point, roofPoints[0]) <= 1
+      ) {
+        closeRoof();
+        return;
+      }
+      if (
+        roofPoints.length &&
+        segmentLength(point, roofPoints[roofPoints.length - 1]) < 0.25
+      ) {
+        return;
+      }
+      setRoofPoints((current) => [...current, point]);
+      return;
+    }
+
+    const roofHit = roofEdges
+      .map((edge) => ({
+        index: edge.index,
+        distance: pointToSegmentDistance(point, edge.start, edge.end),
+      }))
+      .sort((a, b) => a.distance - b.distance)[0];
+    const wallHit = walls
+      .map((wall) => ({
+        index: wall.index,
+        distance: pointToSegmentDistance(point, wall.start, wall.end),
+      }))
+      .sort((a, b) => a.distance - b.distance)[0];
+    if (wallHit && wallHit.distance <= 1 && (!roofHit || wallHit.distance <= roofHit.distance)) {
+      setSelection({ kind: "wall", index: wallHit.index });
+      setWallHeightDraft((wallHeights[wallHit.index] ?? 9).toFixed(2));
+    } else if (roofHit && roofHit.distance <= 1) {
+      setSelection({ kind: "roof-edge", index: roofHit.index });
+    } else {
+      setSelection(null);
     }
   };
 
-  const previewInset = Number.isFinite(catalogEditDraft.inset)
-    ? Math.max(-2, Math.min(4, catalogEditDraft.inset))
-    : 0;
-  const previewHeight = Number.isFinite(catalogEditDraft.height)
-    ? Math.max(0, Math.min(6, catalogEditDraft.height))
-    : 0;
-  const previewWallFaceX = 158;
-  const previewPlateY = 146;
-  const previewLocatorX = previewWallFaceX - previewInset * 22;
+  const handlePlanPointerMove = (
+    event: React.PointerEvent<HTMLCanvasElement>,
+  ) => {
+    if (command === "select") return;
+    const canvas = planRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const { scale, centerX, centerY } = planScaleRef.current;
+    setPointerWorld({
+      x: Math.round(((event.clientX - rect.left - centerX) / scale) * 2) / 2,
+      z: Math.round(((event.clientY - rect.top - centerY) / scale) * 2) / 2,
+    });
+  };
+
+  const selectedCatalog =
+    selection?.kind === "catalog"
+      ? eaveCatalog.find((condition) => condition.id === selection.id)
+      : null;
+  const previewInset = Math.max(-2, Math.min(4, catalogDraft.inset || 0));
+  const previewHeight = Math.max(0, Math.min(6, catalogDraft.height || 0));
+  const previewWallFaceX = 150;
+  const previewPlateY = 140;
+  const previewLocatorX = previewWallFaceX - previewInset * 20;
   const previewLocatorY = previewPlateY + previewHeight * 9;
-  const previewXStart = Math.min(previewWallFaceX, previewLocatorX);
-  const previewXWidth = Math.max(
-    1,
-    Math.abs(previewWallFaceX - previewLocatorX),
-  );
-  const previewYHeight = Math.max(1, previewLocatorY - previewPlateY);
 
   return (
     <main className="studio-shell">
@@ -1528,107 +1122,132 @@ export default function Home() {
               </button>
             ))}
           </div>
-          <span className="status-chip">MVP 01</span>
-          <button className="ghost-button" onClick={reset}>Reset</button>
+          <button className="ghost-button" onClick={reset}>
+            Reset
+          </button>
           <button className="primary-button">Save study</button>
         </div>
       </header>
 
       <div className="workspace">
         <aside className="control-panel">
-          <ControlHeading number="01" title="Broad form" />
-          <p className="section-copy">
-            Choose the structural form. Finish eaves and trim come later.
-          </p>
-          <div className="form-options">
-            {(Object.keys(PRESETS) as RoofKind[]).map((kind) => (
+          <div className="control-section command-section">
+            <ControlHeading number="01" title="Author geometry" />
+            <p className="section-copy">
+              Walls and roof boundaries are independent paths.
+            </p>
+            <div className="command-picker">
               <button
-                key={kind}
-                className={`form-option ${roofKind === kind ? "active" : ""}`}
-                onClick={() => chooseKind(kind)}
+                className={command === "select" ? "active" : ""}
+                onClick={() => setCommand("select")}
               >
-                <span className={`roof-glyph ${kind}`} />
-                <span>
-                  <strong>{PRESETS[kind].label}</strong>
-                  <small>{PRESETS[kind].description}</small>
-                </span>
+                <span>↖</span>
+                <strong>Select</strong>
+                <small>Inspect walls and roof edges</small>
               </button>
-            ))}
+              <button
+                className={command === "walls" ? "active wall-command" : ""}
+                onClick={() => startCommand("walls")}
+              >
+                <span>⌁</span>
+                <strong>Draw walls</strong>
+                <small>Each segment becomes one wall</small>
+              </button>
+              <button
+                className={command === "roof" ? "active roof-command" : ""}
+                onClick={() => startCommand("roof")}
+              >
+                <span>◇</span>
+                <strong>Draw roof</strong>
+                <small>Click the start point to close</small>
+              </button>
+            </div>
+            {command !== "select" && (
+              <div className="active-command-card">
+                <strong>
+                  {command === "walls" ? "Drawing walls" : "Drawing roof boundary"}
+                </strong>
+                <span>
+                  {command === "walls"
+                    ? `${Math.max(0, wallPoints.length - 1)} wall segments`
+                    : `${roofPoints.length} boundary points`}
+                </span>
+                <div>
+                  {command === "walls" && wallPoints.length >= 2 && (
+                    <button onClick={finishWalls}>Finish open path</button>
+                  )}
+                  {command === "walls" && wallPoints.length >= 3 && (
+                    <button onClick={closeWalls}>Close path</button>
+                  )}
+                  <button
+                    onClick={() => {
+                      setCommand("select");
+                      setPointerWorld(null);
+                    }}
+                  >
+                    Stop
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="control-section">
-            <ControlHeading number="02" title="Bearing footprint" />
+            <ControlHeading number="02" title="Roof volume" />
+            <div className="compact-form-options">
+              {(Object.keys(ROOF_FORMS) as RoofKind[]).map((kind) => (
+                <button
+                  key={kind}
+                  className={roofKind === kind ? "active" : ""}
+                  onClick={() => setRoofKind(kind)}
+                >
+                  <strong>{ROOF_FORMS[kind].label}</strong>
+                  <small>{ROOF_FORMS[kind].description}</small>
+                </button>
+              ))}
+            </div>
             <Range
-              label="Width"
-              value={buildingWidth}
-              min={16}
-              max={52}
-              step={1}
-              output={feetInches(buildingWidth)}
-              onChange={setBuildingWidth}
-            />
-            <Range
-              label="Depth"
-              value={buildingDepth}
-              min={20}
-              max={64}
-              step={1}
-              output={feetInches(buildingDepth)}
-              onChange={setBuildingDepth}
-            />
-            <Range
-              label="Level all plates"
-              value={
-                plateHeights.reduce((sum, height) => sum + height, 0) /
-                plateHeights.length
-              }
-              min={7}
-              max={14}
+              label="Default roof base"
+              value={roofBase}
+              min={4}
+              max={30}
               step={0.25}
-              output="Reset datum"
-              onChange={setAllPlateHeights}
+              output={feetInches(roofBase)}
+              onChange={setRoofBase}
             />
-          </div>
-
-          <div className="control-section">
-            <ControlHeading number="03" title="Structural rules" />
             <Range
-              label={roofKind === "shed" ? "Target pitch" : "Pitch"}
-              value={roofKind === "shed" ? effectivePitch : pitch}
+              label="Pitch"
+              value={pitch}
               min={1}
-              max={14}
+              max={16}
               step={0.5}
-              output={`${effectivePitch.toFixed(1)}:12`}
-              onChange={setAuthoredPitch}
+              output={`${pitch.toFixed(1)}:12`}
+              onChange={setPitch}
             />
           </div>
 
-          <div className="control-section eave-catalog-section">
-            <ControlHeading number="04" title="Eave condition catalog" />
+          <div className="control-section catalog-section">
+            <ControlHeading number="03" title="Eave detail catalog" />
             <p className="catalog-copy">
-              Saved wall-section locators. Assign one after selecting a roof
-              edge.
+              Stable wall-to-roof locators assigned per roof edge.
             </p>
             <div className="eave-catalog-list">
               {eaveCatalog.map((condition) => (
                 <button
-                  className={`eave-catalog-item ${
-                    selectedCatalogId === condition.id ? "active" : ""
-                  }`}
                   key={condition.id}
-                  aria-pressed={selectedCatalogId === condition.id}
-                  onClick={() => openCatalogInspector(condition)}
+                  className={`eave-catalog-item ${
+                    selection?.kind === "catalog" &&
+                    selection.id === condition.id
+                      ? "active"
+                      : ""
+                  }`}
+                  onClick={() => openCatalog(condition)}
                 >
-                  <span className="condition-diagram">
-                    <i className="condition-wall" />
-                    <i className="condition-roof" />
-                    <i className="condition-point" />
-                  </span>
+                  <ConditionDiagram />
                   <span>
                     <strong>{condition.name}</strong>
                     <small>
-                      {condition.driver === "heel" ? "Heel" : "Seat"} · X{" "}
-                      {feetInches(condition.inset)} · Y +
+                      X {feetInches(condition.inset)} · Y +
                       {feetInches(condition.height)}
                     </small>
                   </span>
@@ -1636,13 +1255,12 @@ export default function Home() {
                 </button>
               ))}
             </div>
-            {showEaveCreator ? (
+            {showCatalogCreator ? (
               <div className="eave-creator">
                 <input
-                  aria-label="Eave condition name"
-                  value={eaveDraft.name}
+                  value={newCatalogDraft.name}
                   onChange={(event) =>
-                    setEaveDraft((current) => ({
+                    setNewCatalogDraft((current) => ({
                       ...current,
                       name: event.target.value,
                     }))
@@ -1650,26 +1268,25 @@ export default function Home() {
                 />
                 <div className="eave-creator-row">
                   <select
-                    aria-label="Structural locator type"
-                    value={eaveDraft.driver}
+                    value={newCatalogDraft.driver}
                     onChange={(event) =>
-                      setEaveDraft((current) => ({
+                      setNewCatalogDraft((current) => ({
                         ...current,
                         driver: event.target.value as EaveDriver,
                       }))
                     }
                   >
-                    <option value="heel">Heel height</option>
-                    <option value="seat">Seat cut</option>
+                    <option value="heel">Heel</option>
+                    <option value="seat">Seat</option>
                   </select>
                   <label>
                     X
                     <input
                       type="number"
                       step={0.25}
-                      value={eaveDraft.inset}
+                      value={newCatalogDraft.inset}
                       onChange={(event) =>
-                        setEaveDraft((current) => ({
+                        setNewCatalogDraft((current) => ({
                           ...current,
                           inset: Number(event.target.value),
                         }))
@@ -1680,11 +1297,10 @@ export default function Home() {
                     Y
                     <input
                       type="number"
-                      min={0}
                       step={0.25}
-                      value={eaveDraft.height}
+                      value={newCatalogDraft.height}
                       onChange={(event) =>
-                        setEaveDraft((current) => ({
+                        setNewCatalogDraft((current) => ({
                           ...current,
                           height: Number(event.target.value),
                         }))
@@ -1693,10 +1309,10 @@ export default function Home() {
                   </label>
                 </div>
                 <div className="eave-creator-actions">
-                  <button onClick={() => setShowEaveCreator(false)}>
+                  <button onClick={() => setShowCatalogCreator(false)}>
                     Cancel
                   </button>
-                  <button className="save-condition" onClick={saveEaveCondition}>
+                  <button className="save-condition" onClick={saveNewCondition}>
                     Save type
                   </button>
                 </div>
@@ -1704,7 +1320,7 @@ export default function Home() {
             ) : (
               <button
                 className="add-condition-button"
-                onClick={() => setShowEaveCreator(true)}
+                onClick={() => setShowCatalogCreator(true)}
               >
                 + New condition
               </button>
@@ -1712,7 +1328,7 @@ export default function Home() {
           </div>
 
           <div className="control-section layer-section">
-            <ControlHeading number="05" title="View" />
+            <ControlHeading number="04" title="View" />
             <Check label="Wall volume" value={showWalls} onChange={setShowWalls} />
             <Check
               label="Construction datums"
@@ -1731,51 +1347,39 @@ export default function Home() {
           {viewMode !== "form" && (
             <ViewPanel
               className="plan-panel"
-              eyebrow="PLAN / BEARING INTENT"
-              title="Top-of-plate footprint"
+              eyebrow="PLAN / AUTHORING"
+              title={
+                command === "walls"
+                  ? "Draw wall path"
+                  : command === "roof"
+                    ? "Draw closed roof boundary"
+                    : "Independent wall + roof geometry"
+              }
               extra={
                 <div className="legend">
-                  <span><i className="legend-line bearing" /> Plate rail</span>
-                  <span><i className="legend-line roof" /> Derived topology</span>
+                  <span>
+                    <i className="legend-line bearing" /> Walls
+                  </span>
+                  <span>
+                    <i className="legend-line roof" /> Roof boundary
+                  </span>
                 </div>
               }
             >
-            <canvas
-              ref={planRef}
-              aria-label="Plan view of roof bearing footprint"
-              onClick={(event) => {
-                const canvas = planRef.current;
-                if (!canvas) return;
-                const rect = canvas.getBoundingClientRect();
-                const margin = 64;
-                const roofWidth =
-                  buildingWidth + overhangs[3] + overhangs[1];
-                const roofDepth =
-                  buildingDepth + overhangs[0] + overhangs[2];
-                const scale = Math.min(
-                  (rect.width - margin * 2) / roofWidth,
-                  (rect.height - margin * 2) / roofDepth,
-                );
-                const roofLeft = (rect.width - roofWidth * scale) / 2;
-                const roofTop = (rect.height - roofDepth * scale) / 2;
-                const roofRight = roofLeft + roofWidth * scale;
-                const roofBottom = roofTop + roofDepth * scale;
-                const x = event.clientX - rect.left;
-                const y = event.clientY - rect.top;
-                const distances = [
-                  Math.abs(y - roofTop),
-                  Math.abs(x - roofRight),
-                  Math.abs(y - roofBottom),
-                  Math.abs(x - roofLeft),
-                ];
-                const edge = distances.indexOf(Math.min(...distances));
-                setSelectedEdge(edge);
-                setSelected3DEave(edge);
-                setSelected3DWall(null);
-                setSelectedCatalogId(null);
-              }}
-            />
-            <div className="canvas-note">Select an edge to inspect its intent</div>
+              <canvas
+                ref={planRef}
+                aria-label="Plan authoring canvas"
+                onClick={handlePlanClick}
+                onPointerMove={handlePlanPointerMove}
+                onPointerLeave={() => setPointerWorld(null)}
+              />
+              <div className="canvas-note">
+                {command === "roof"
+                  ? "Roof must close on its start point"
+                  : command === "walls"
+                    ? "Enter finishes an open wall path"
+                    : "Select a wall or roof edge to edit"}
+              </div>
             </ViewPanel>
           )}
 
@@ -1784,181 +1388,139 @@ export default function Home() {
               className="form-panel"
               eyebrow="FORM / STRUCTURE"
               title={
-                roofResolved
-                  ? "Coherent roof volume"
-                  : "No coherent roof volume"
+                roofClosed
+                  ? "Independent roof volume"
+                  : "Roof boundary is open"
               }
-              extra={
-                <div className="view-tabs">
-                  <button className="active">Solid</button>
-                  <button onClick={() => setShowTopology(!showTopology)}>Planes</button>
-                </div>
-              }
+              extra={<span className="view-label">LEFT-DRAG TO ORBIT</span>}
             >
-            <canvas
-              ref={formRef}
-              aria-label="Three dimensional structural roof form"
-              onClick={(event) => {
-                if (didOrbit.current) {
+              <canvas
+                ref={formRef}
+                aria-label="Three dimensional roof and wall model"
+                onClick={(event) => {
+                  if (didOrbit.current) {
+                    didOrbit.current = false;
+                    return;
+                  }
+                  const canvas = formRef.current;
+                  if (!canvas) return;
+                  const rect = canvas.getBoundingClientRect();
+                  const pointer = {
+                    x: event.clientX - rect.left,
+                    y: event.clientY - rect.top,
+                  };
+                  const eave = formEaveRegions.current.find(
+                    (region) =>
+                      pointToSegmentDistance(
+                        { x: pointer.x, z: pointer.y },
+                        { x: region.start.x, z: region.start.y },
+                        { x: region.end.x, z: region.end.y },
+                      ) <= 9,
+                  );
+                  if (eave) {
+                    setSelection({ kind: "roof-edge", index: eave.index });
+                    return;
+                  }
+                  const wall = [...formWallRegions.current]
+                    .reverse()
+                    .find((region) => pointInPolygon(pointer, region.points));
+                  if (wall) {
+                    setSelection({ kind: "wall", index: wall.index });
+                    setWallHeightDraft(
+                      (wallHeights[wall.index] ?? 9).toFixed(2),
+                    );
+                    return;
+                  }
+                  setSelection(null);
+                }}
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return;
+                  event.preventDefault();
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                  event.currentTarget.style.cursor = "grabbing";
                   didOrbit.current = false;
-                  return;
-                }
-                const canvas = formRef.current;
-                if (!canvas) return;
-                const rect = canvas.getBoundingClientRect();
-                const pointer = {
-                  x: event.clientX - rect.left,
-                  y: event.clientY - rect.top,
-                };
-                const eave = formEaveRegions.current.find((region) =>
-                  region.points
-                    .slice(1)
-                    .some(
-                      (point, index) =>
-                        pointToSegmentDistance(
-                          pointer,
-                          region.points[index],
-                          point,
-                        ) <= 9,
+                  orbitDrag.current = {
+                    pointerId: event.pointerId,
+                    x: event.clientX,
+                    y: event.clientY,
+                    yaw: orbit.yaw,
+                    pitch: orbit.pitch,
+                  };
+                }}
+                onPointerMove={(event) => {
+                  const drag = orbitDrag.current;
+                  if (!drag || drag.pointerId !== event.pointerId) return;
+                  if (
+                    Math.abs(event.clientX - drag.x) +
+                      Math.abs(event.clientY - drag.y) >
+                    3
+                  ) {
+                    didOrbit.current = true;
+                  }
+                  setOrbit({
+                    yaw: drag.yaw - (event.clientX - drag.x) * 0.45,
+                    pitch: Math.max(
+                      -85,
+                      Math.min(
+                        85,
+                        drag.pitch + (event.clientY - drag.y) * 0.35,
+                      ),
                     ),
-                );
-                if (eave) {
-                  setSelectedEdge(eave.edge);
-                  setSelected3DEave(eave.edge);
-                  setSelected3DWall(null);
-                  setSelectedCatalogId(null);
-                  return;
-                }
-                const wall = [...formWallRegions.current]
-                  .reverse()
-                  .find((region) => pointInPolygon(pointer, region.points));
-                if (wall) {
-                  setSelectedEdge(wall.edge);
-                  setSelected3DWall(wall.edge);
-                  setSelected3DEave(null);
-                  setSelectedCatalogId(null);
-                  setWallHeightDraft(plateHeights[wall.edge].toFixed(2));
-                  return;
-                }
-                setSelected3DWall(null);
-                setSelected3DEave(null);
-                setSelectedCatalogId(null);
-                setSelectedPlane(
-                  roofKind === "shed"
-                    ? "shed-plane"
-                    : selectedPlane === "east-plane"
-                      ? "west-plane"
-                      : "east-plane",
-                );
-              }}
-              onPointerDown={(event) => {
-                if (event.button !== 0) return;
-                event.preventDefault();
-                event.currentTarget.setPointerCapture(event.pointerId);
-                event.currentTarget.style.cursor = "grabbing";
-                didOrbit.current = false;
-                orbitDrag.current = {
-                  pointerId: event.pointerId,
-                  x: event.clientX,
-                  y: event.clientY,
-                  yaw: orbit.yaw,
-                  pitch: orbit.pitch,
-                };
-              }}
-              onPointerMove={(event) => {
-                const drag = orbitDrag.current;
-                if (!drag || drag.pointerId !== event.pointerId) return;
-                if (
-                  Math.abs(event.clientX - drag.x) +
-                    Math.abs(event.clientY - drag.y) >
-                  3
-                ) {
-                  didOrbit.current = true;
-                }
-                setOrbit({
-                  yaw: drag.yaw - (event.clientX - drag.x) * 0.45,
-                  pitch: Math.max(
-                    -85,
-                    Math.min(85, drag.pitch + (event.clientY - drag.y) * 0.35),
-                  ),
-                });
-              }}
-              onPointerUp={(event) => {
-                if (orbitDrag.current?.pointerId !== event.pointerId) return;
-                event.currentTarget.releasePointerCapture(event.pointerId);
-                event.currentTarget.style.cursor = "grab";
-                orbitDrag.current = null;
-              }}
-              onPointerCancel={(event) => {
-                event.currentTarget.style.cursor = "grab";
-                orbitDrag.current = null;
-              }}
-            />
-            <div className="canvas-note orbit-note">
-              Left-click + drag to orbit
-            </div>
-            <div className="orientation">
-              {Math.round(((orbit.yaw % 360) + 360) % 360)}°
-            </div>
-            {showWalls &&
-              selected3DWall !== null &&
-              wallHandlePosition && (
+                  });
+                }}
+                onPointerUp={(event) => {
+                  if (orbitDrag.current?.pointerId !== event.pointerId) return;
+                  event.currentTarget.releasePointerCapture(event.pointerId);
+                  event.currentTarget.style.cursor = "grab";
+                  orbitDrag.current = null;
+                }}
+                onPointerCancel={(event) => {
+                  event.currentTarget.style.cursor = "grab";
+                  orbitDrag.current = null;
+                }}
+              />
+              <div className="canvas-note orbit-note">
+                Left-click + drag to orbit
+              </div>
+              <div className="orientation">
+                {Math.round(((orbit.yaw % 360) + 360) % 360)}°
+              </div>
+              {selection?.kind === "wall" && wallHandlePosition && (
                 <button
                   className="wall-height-handle"
                   style={{
                     left: wallHandlePosition.x,
                     top: wallHandlePosition.y,
                   }}
-                  aria-label={`Drag to change ${EDGE_LABELS[selected3DWall]} wall height`}
+                  aria-label={`Drag to change wall ${selection.index + 1} height`}
                   onPointerDown={(event) => {
-                    if (event.button !== 0 || selected3DWall === null) return;
+                    if (event.button !== 0) return;
                     event.preventDefault();
                     event.stopPropagation();
                     event.currentTarget.setPointerCapture(event.pointerId);
                     wallHeightDrag.current = {
                       pointerId: event.pointerId,
                       startY: event.clientY,
-                      startHeight: plateHeights[selected3DWall],
+                      startHeight: wallHeights[selection.index] ?? 9,
                     };
                   }}
                   onPointerMove={(event) => {
                     const drag = wallHeightDrag.current;
-                    if (
-                      !drag ||
-                      drag.pointerId !== event.pointerId ||
-                      selected3DWall === null
-                    ) {
-                      return;
-                    }
-                    const canvas = formRef.current;
-                    if (!canvas) return;
-                    const rect = canvas.getBoundingClientRect();
-                    const canvasScale = Math.min(
-                      rect.width / 70,
-                      rect.height / 46,
-                    );
-                    const cameraPitch = (orbit.pitch * Math.PI) / 180;
-                    const pixelsPerFoot =
-                      canvasScale *
-                      Math.max(0.25, Math.abs(Math.cos(cameraPitch)));
-                    const rawHeight =
-                      drag.startHeight +
-                      (drag.startY - event.clientY) / pixelsPerFoot;
-                    const nextHeight = Math.max(
-                      6,
-                      Math.min(30, Math.round(rawHeight * 4) / 4),
-                    );
-                    setPlateHeights((current) =>
-                      current.map((height, index) =>
-                        index === selected3DWall ? nextHeight : height,
-                      ),
-                    );
-                    setWallHeightDraft(nextHeight.toFixed(2));
+                    if (!drag || drag.pointerId !== event.pointerId) return;
+                    const nextHeight = Math.round(
+                      Math.max(
+                        4,
+                        Math.min(
+                          30,
+                          drag.startHeight + (drag.startY - event.clientY) / 9,
+                        ),
+                      ) * 4,
+                    ) / 4;
+                    updateWallHeight(selection.index, nextHeight);
                   }}
                   onPointerUp={(event) => {
-                    if (wallHeightDrag.current?.pointerId !== event.pointerId) {
+                    if (wallHeightDrag.current?.pointerId !== event.pointerId)
                       return;
-                    }
                     event.currentTarget.releasePointerCapture(event.pointerId);
                     wallHeightDrag.current = null;
                   }}
@@ -1969,7 +1531,9 @@ export default function Home() {
                   <span className="wall-height-arrows" aria-hidden="true">
                     ↑<i />↓
                   </span>
-                  <output>{feetInches(plateHeights[selected3DWall])}</output>
+                  <output>
+                    {feetInches(wallHeights[selection.index] ?? 9)}
+                  </output>
                 </button>
               )}
             </ViewPanel>
@@ -1977,238 +1541,40 @@ export default function Home() {
         </section>
 
         <aside className="detail-inspector">
-          {selectedCatalogId ? (
+          {selection?.kind === "wall" ? (
             <>
-            <header className="detail-inspector-header">
-              <div>
-                <span className="view-label">EAVE DETAIL CATALOG</span>
-                <h2>Edit wall / roof condition</h2>
-              </div>
-              <button
-                aria-label="Close eave detail inspector"
-                onClick={() => setSelectedCatalogId(null)}
-              >
-                ×
-              </button>
-            </header>
-
-            <div className="detail-preview">
-              <span className="preview-ground" />
-              <span className="preview-wall" />
-              <span className="preview-plate" />
-              <span
-                className="preview-roof"
-                style={{
-                  left: previewLocatorX - 55,
-                  bottom: previewLocatorY - 4.5,
-                }}
+              <InspectorHeader
+                label="SELECTED WALL SEGMENT"
+                title={`Wall ${selection.index + 1}`}
+                onClose={() => setSelection(null)}
               />
-              <span
-                className="preview-locator"
-                style={{
-                  left: previewLocatorX - 5.5,
-                  bottom: previewLocatorY - 5.5,
-                }}
-              />
-              <span
-                className="preview-x-dimension"
-                style={{
-                  left: previewXStart,
-                  width: previewXWidth,
-                  bottom: previewPlateY - 23,
-                }}
-              />
-              <span
-                className="preview-y-dimension"
-                style={{
-                  left: previewWallFaceX + 20,
-                  bottom: previewPlateY,
-                  height: previewYHeight,
-                }}
-              />
-              <span className="preview-label plate">T.O. PLATE</span>
-              <span className="preview-label roof">ROOF PLANE</span>
-              <span
-                className="preview-label x"
-                style={{
-                  left: previewXStart + previewXWidth / 2 - 22,
-                  bottom: previewPlateY - 39,
-                }}
-              >
-                X {feetInches(catalogEditDraft.inset)}
-              </span>
-              <span
-                className="preview-label y"
-                style={{
-                  left: previewWallFaceX + 28,
-                  bottom:
-                    previewPlateY + previewYHeight / 2 - 5,
-                }}
-              >
-                Y +{feetInches(catalogEditDraft.height)}
-              </span>
-              <span
-                className="preview-label driver"
-                style={{
-                  left: previewLocatorX - 30,
-                  bottom: previewLocatorY + 15,
-                }}
-              >
-                {catalogEditDraft.driver === "heel"
-                  ? "HEEL DATUM"
-                  : "SEAT CUT"}
-              </span>
-            </div>
-
-            <p className="detail-preview-caption">
-              The roof plane passes through this stable locator. Overhang is
-              assigned separately on each roof edge.
-            </p>
-
-            <div className="detail-form">
-              <label>
-                <span>Detail name</span>
-                <input
-                  value={catalogEditDraft.name}
-                  onChange={(event) =>
-                    setCatalogEditDraft((current) => ({
-                      ...current,
-                      name: event.target.value,
-                    }))
-                  }
-                />
-              </label>
-              <label>
-                <span>Structural driver</span>
-                <select
-                  value={catalogEditDraft.driver}
-                  onChange={(event) =>
-                    setCatalogEditDraft((current) => ({
-                      ...current,
-                      driver: event.target.value as EaveDriver,
-                    }))
-                  }
-                >
-                  <option value="heel">Heel height</option>
-                  <option value="seat">Seat cut</option>
-                </select>
-              </label>
-              <div className="detail-form-row">
-                <label>
-                  <span>X · inboard from wall face</span>
-                  <div>
-                    <input
-                      type="number"
-                      min={-2}
-                      max={4}
-                      step={0.25}
-                      value={catalogEditDraft.inset}
-                      onChange={(event) =>
-                        setCatalogEditDraft((current) => ({
-                          ...current,
-                          inset: Number(event.target.value),
-                        }))
-                      }
-                    />
-                    <i>ft</i>
-                  </div>
-                </label>
-                <label>
-                  <span>Y · above top plate</span>
-                  <div>
-                    <input
-                      type="number"
-                      min={0}
-                      max={6}
-                      step={0.25}
-                      value={catalogEditDraft.height}
-                      onChange={(event) =>
-                        setCatalogEditDraft((current) => ({
-                          ...current,
-                          height: Number(event.target.value),
-                        }))
-                      }
-                    />
-                    <i>ft</i>
-                  </div>
-                </label>
-              </div>
-            </div>
-
-            <div className="detail-inspector-note">
-              Saving updates every roof edge currently assigned this detail.
-            </div>
-
-            <div className="detail-inspector-actions">
-              <button
-                className="delete-detail"
-                disabled={eaveCatalog.length <= 1}
-                onClick={deleteCatalogCondition}
-              >
-                Delete
-              </button>
-              <button className="save-detail" onClick={updateCatalogCondition}>
-                Save changes
-              </button>
-            </div>
-            </>
-          ) : selected3DWall !== null ? (
-            <>
-              <header className="detail-inspector-header">
-                <div>
-                  <span className="view-label">SELECTED WALL</span>
-                  <h2>{EDGE_LABELS[selected3DWall]} wall</h2>
-                </div>
-                <button
-                  aria-label="Clear wall selection"
-                  onClick={() => setSelected3DWall(null)}
-                >
-                  ×
-                </button>
-              </header>
-
               <div className="inspector-selection-summary">
-                <span>{roleLabel(roles[selected3DWall])}</span>
-                <strong>{feetInches(plateHeights[selected3DWall])}</strong>
+                <span>Individual wall</span>
+                <strong>
+                  {feetInches(
+                    segmentLength(
+                      walls[selection.index]?.start ?? { x: 0, z: 0 },
+                      walls[selection.index]?.end ?? { x: 0, z: 0 },
+                    ),
+                  )}{" "}
+                  long
+                </strong>
               </div>
-
               <div className="detail-form inspector-properties">
                 <label>
                   <span>Top / plate height</span>
                   <div className="height-input">
                     <input
                       type="number"
-                      min={6}
+                      min={4}
                       max={30}
                       step={0.25}
                       value={wallHeightDraft}
                       onChange={(event) => {
-                        const nextDraft = event.target.value;
-                        setWallHeightDraft(nextDraft);
-                        const nextHeight = Number(nextDraft);
-                        if (
-                          !nextDraft.trim() ||
-                          !Number.isFinite(nextHeight) ||
-                          nextHeight < 6 ||
-                          nextHeight > 30
-                        ) {
-                          return;
-                        }
-                        setPlateHeights((current) =>
-                          current.map((height, index) =>
-                            index === selected3DWall ? nextHeight : height,
-                          ),
-                        );
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") {
-                          commitWallHeight();
-                          event.currentTarget.blur();
-                        }
-                        if (event.key === "Escape") {
-                          setWallHeightDraft(
-                            plateHeights[selected3DWall].toFixed(2),
-                          );
+                        setWallHeightDraft(event.target.value);
+                        const value = Number(event.target.value);
+                        if (Number.isFinite(value) && value >= 4 && value <= 30) {
+                          updateWallHeight(selection.index, value);
                         }
                       }}
                     />
@@ -2216,55 +1582,75 @@ export default function Home() {
                   </div>
                 </label>
               </div>
-
               <div className="detail-inspector-note">
-                Arrow controls and typed values update the wall live. Drag the
-                handle in 3D for direct height editing.
+                This segment is independent. Roof edges assigned to it follow
+                this plate height through their eave detail.
               </div>
-
               <dl className="inspector-data">
                 <div>
-                  <dt>Roof relationship</dt>
-                  <dd>{roleLabel(roles[selected3DWall])}</dd>
-                </div>
-                <div>
-                  <dt>Assigned condition</dt>
+                  <dt>Roof edges following this wall</dt>
                   <dd>
-                    {eaveCatalog.find(
-                      (condition) =>
-                        condition.id === edgeEaveIds[selected3DWall],
-                    )?.name ?? "Unassigned"}
+                    {relationships
+                      .map((relationship, index) =>
+                        relationship.wallIndex === selection.index
+                          ? `E${index + 1}`
+                          : null,
+                      )
+                      .filter(Boolean)
+                      .join(", ") || "None"}
                   </dd>
                 </div>
               </dl>
             </>
-          ) : selected3DEave !== null ? (
+          ) : selection?.kind === "roof-edge" ? (
             <>
-              <header className="detail-inspector-header">
-                <div>
-                  <span className="view-label">SELECTED ROOF EDGE</span>
-                  <h2>{EDGE_LABELS[selected3DEave]} eave</h2>
-                </div>
-                <button
-                  aria-label="Clear roof edge selection"
-                  onClick={() => setSelected3DEave(null)}
-                >
-                  ×
-                </button>
-              </header>
-
+              <InspectorHeader
+                label="SELECTED ROOF EDGE"
+                title={`Roof edge ${selection.index + 1}`}
+                onClose={() => setSelection(null)}
+              />
               <div className="inspector-selection-summary">
-                <span>{roleLabel(roles[selected3DEave])}</span>
-                <strong>E{selected3DEave + 1}</strong>
+                <span>Authored boundary segment</span>
+                <strong>
+                  {feetInches(
+                    segmentLength(
+                      roofEdges[selection.index]?.start ?? { x: 0, z: 0 },
+                      roofEdges[selection.index]?.end ?? { x: 0, z: 0 },
+                    ),
+                  )}
+                </strong>
               </div>
-
               <div className="detail-form inspector-properties">
                 <label>
-                  <span>Wall / roof condition</span>
+                  <span>Vertical relationship</span>
                   <select
-                    value={edgeEaveIds[selected3DEave]}
+                    value={relationships[selection.index]?.wallIndex ?? ""}
                     onChange={(event) =>
-                      assignEaveCondition(selected3DEave, event.target.value)
+                      updateRelationship(selection.index, {
+                        wallIndex:
+                          event.target.value === ""
+                            ? null
+                            : Number(event.target.value),
+                      })
+                    }
+                  >
+                    <option value="">Use roof base datum</option>
+                    {walls.map((wall) => (
+                      <option key={wall.index} value={wall.index}>
+                        Follow wall {wall.index + 1} ·{" "}
+                        {feetInches(wallHeights[wall.index] ?? 9)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Eave condition</span>
+                  <select
+                    value={relationships[selection.index]?.conditionId ?? ""}
+                    onChange={(event) =>
+                      updateRelationship(selection.index, {
+                        conditionId: event.target.value,
+                      })
                     }
                   >
                     {eaveCatalog.map((condition) => (
@@ -2274,16 +1660,18 @@ export default function Home() {
                     ))}
                   </select>
                 </label>
-
                 <div className="condition-coordinate">
                   <span>
-                    X {feetInches(bearingInsets[selected3DEave])} inboard
+                    X{" "}
+                    {feetInches(conditionForEdge(selection.index)?.inset ?? 0)}{" "}
+                    inboard
                   </span>
                   <span>
-                    Y +{feetInches(bearingOffsets[selected3DEave])} above plate
+                    Y +
+                    {feetInches(conditionForEdge(selection.index)?.height ?? 0)}{" "}
+                    above plate
                   </span>
                 </div>
-
                 <label>
                   <span>Independent overhang</span>
                   <div className="height-input">
@@ -2292,41 +1680,205 @@ export default function Home() {
                       min={0}
                       max={8}
                       step={0.25}
-                      value={edgeOverhangs[selected3DEave]}
-                      onChange={(event) => {
-                        const nextValue = Number(event.target.value);
-                        if (!Number.isFinite(nextValue)) return;
-                        setEdgeOverhangs((current) =>
-                          current.map((overhang, index) =>
-                            index === selected3DEave
-                              ? Math.max(0, Math.min(8, nextValue))
-                              : overhang,
+                      value={relationships[selection.index]?.overhang ?? 0}
+                      onChange={(event) =>
+                        updateRelationship(selection.index, {
+                          overhang: Math.max(
+                            0,
+                            Math.min(8, Number(event.target.value) || 0),
                           ),
-                        );
-                      }}
+                        })
+                      }
                     />
                     <span>ft</span>
                   </div>
                 </label>
               </div>
-
-              <div className="detail-inspector-note">
-                The condition controls the stable X/Y roof locator. Overhang
-                extends beyond it independently.
+              <dl className="inspector-data">
+                <div>
+                  <dt>Resolved eave elevation</dt>
+                  <dd>{feetInches(edgeBaseElevation(selection.index))}</dd>
+                </div>
+                <div>
+                  <dt>Corner behavior</dt>
+                  <dd>Blend adjacent edge elevations</dd>
+                </div>
+              </dl>
+            </>
+          ) : selectedCatalog ? (
+            <>
+              <InspectorHeader
+                label="EAVE DETAIL CATALOG"
+                title="Edit wall / roof condition"
+                onClose={() => setSelection(null)}
+              />
+              <div className="detail-preview">
+                <span className="preview-ground" />
+                <span className="preview-wall" />
+                <span className="preview-plate" />
+                <span
+                  className="preview-roof"
+                  style={{
+                    left: previewLocatorX - 55,
+                    bottom: previewLocatorY - 4.5,
+                  }}
+                />
+                <span
+                  className="preview-locator"
+                  style={{
+                    left: previewLocatorX - 5.5,
+                    bottom: previewLocatorY - 5.5,
+                  }}
+                />
+                <span
+                  className="preview-x-dimension"
+                  style={{
+                    left: Math.min(previewWallFaceX, previewLocatorX),
+                    width: Math.max(
+                      1,
+                      Math.abs(previewWallFaceX - previewLocatorX),
+                    ),
+                    bottom: previewPlateY - 23,
+                  }}
+                />
+                <span
+                  className="preview-y-dimension"
+                  style={{
+                    left: previewWallFaceX + 20,
+                    bottom: previewPlateY,
+                    height: Math.max(1, previewLocatorY - previewPlateY),
+                  }}
+                />
+                <span className="preview-label plate">T.O. PLATE</span>
+                <span className="preview-label roof">ROOF PLANE</span>
+                <span
+                  className="preview-label driver"
+                  style={{
+                    left: previewLocatorX - 30,
+                    bottom: previewLocatorY + 15,
+                  }}
+                >
+                  {catalogDraft.driver === "heel" ? "HEEL DATUM" : "SEAT CUT"}
+                </span>
+              </div>
+              <p className="detail-preview-caption">
+                This locator positions a roof edge relative to its assigned wall
+                plate. Overhang remains separate.
+              </p>
+              <div className="detail-form">
+                <label>
+                  <span>Detail name</span>
+                  <input
+                    value={catalogDraft.name}
+                    onChange={(event) =>
+                      setCatalogDraft((current) => ({
+                        ...current,
+                        name: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>Structural driver</span>
+                  <select
+                    value={catalogDraft.driver}
+                    onChange={(event) =>
+                      setCatalogDraft((current) => ({
+                        ...current,
+                        driver: event.target.value as EaveDriver,
+                      }))
+                    }
+                  >
+                    <option value="heel">Heel height</option>
+                    <option value="seat">Seat cut</option>
+                  </select>
+                </label>
+                <div className="detail-form-row">
+                  <label>
+                    <span>X · inboard from wall face</span>
+                    <div>
+                      <input
+                        type="number"
+                        min={-2}
+                        max={4}
+                        step={0.25}
+                        value={catalogDraft.inset}
+                        onChange={(event) =>
+                          setCatalogDraft((current) => ({
+                            ...current,
+                            inset: Number(event.target.value),
+                          }))
+                        }
+                      />
+                      <i>ft</i>
+                    </div>
+                  </label>
+                  <label>
+                    <span>Y · above top plate</span>
+                    <div>
+                      <input
+                        type="number"
+                        min={0}
+                        max={6}
+                        step={0.25}
+                        value={catalogDraft.height}
+                        onChange={(event) =>
+                          setCatalogDraft((current) => ({
+                            ...current,
+                            height: Number(event.target.value),
+                          }))
+                        }
+                      />
+                      <i>ft</i>
+                    </div>
+                  </label>
+                </div>
+              </div>
+              <div className="detail-inspector-actions">
+                <button
+                  className="delete-detail"
+                  disabled={eaveCatalog.length <= 1}
+                  onClick={deleteCatalog}
+                >
+                  Delete
+                </button>
+                <button className="save-detail" onClick={updateCatalog}>
+                  Save changes
+                </button>
               </div>
             </>
           ) : (
-            <div className="inspector-empty">
-              <span className="view-label">INSPECTOR</span>
+            <div className="inspector-empty inspector-model-summary">
+              <span className="view-label">MODEL INSPECTOR</span>
               <div className="inspector-empty-glyph" aria-hidden="true">
                 <i />
                 <b />
               </div>
-              <h2>Nothing selected</h2>
+              <h2>Walls and roof are independent</h2>
               <p>
-                Select a wall, roof edge, or eave detail to inspect and edit
-                its properties.
+                Draw either path, then select a wall or roof edge to define how
+                they relate.
               </p>
+              <dl className="model-counts">
+                <div>
+                  <dt>Walls</dt>
+                  <dd>{walls.length}</dd>
+                </div>
+                <div>
+                  <dt>Roof edges</dt>
+                  <dd>{roofEdges.length}</dd>
+                </div>
+                <div>
+                  <dt>Explicit relationships</dt>
+                  <dd>
+                    {
+                      relationships.filter(
+                        (relationship) => relationship.wallIndex !== null,
+                      ).length
+                    }
+                  </dd>
+                </div>
+              </dl>
             </div>
           )}
         </aside>
@@ -2334,32 +1886,18 @@ export default function Home() {
 
       <footer className="statusbar">
         <span>
-          <i
-            className={
-              !roofResolved || hipVariableTransition
-                ? "warning-dot"
-                : "healthy-dot"
-            }
-          />
-          {!roofResolved
-            ? "No roof solid: bearing-base elevations are contradictory"
-            : hipVariableTransition
-              ? "Roof planes regenerated; corner transitions are provisional"
-            : "Wall tops, bearing rails, section, and 3D form agree"}
+          <i className={roofClosed ? "healthy-dot" : "warning-dot"} />
+          {roofClosed
+            ? "Roof boundary closed · volume generated"
+            : "Roof boundary must close on its first point"}
         </span>
         <span>
-          {makeRoofFaces(
-            roofKind,
-            buildingWidth,
-            buildingDepth,
-            bearingElevations,
-            overhangs,
-            effectivePitch,
-            roofResolved,
-          ).length}{" "}
-          planes · {roofResolved ? 1 : 0} structural form
+          {walls.length} walls · {roofEdges.length} roof edges
         </span>
-        <span>Eave conditions assigned per roof edge</span>
+        <span>
+          {relationships.filter((relationship) => relationship.wallIndex !== null).length}{" "}
+          wall–eave relationships
+        </span>
       </footer>
     </main>
   );
@@ -2393,14 +1931,17 @@ function Range({
 }) {
   return (
     <label className="range-control">
-      <span>{label}<output>{output}</output></span>
+      <span>
+        {label}
+        <output>{output}</output>
+      </span>
       <input
         type="range"
         min={min}
         max={max}
         step={step}
         value={value}
-        onChange={(event) => onChange(+event.target.value)}
+        onChange={(event) => onChange(Number(event.target.value))}
       />
     </label>
   );
@@ -2427,6 +1968,38 @@ function Check({
   );
 }
 
+function ConditionDiagram() {
+  return (
+    <span className="condition-diagram">
+      <i className="condition-wall" />
+      <i className="condition-roof" />
+      <i className="condition-point" />
+    </span>
+  );
+}
+
+function InspectorHeader({
+  label,
+  title,
+  onClose,
+}: {
+  label: string;
+  title: string;
+  onClose: () => void;
+}) {
+  return (
+    <header className="detail-inspector-header">
+      <div>
+        <span className="view-label">{label}</span>
+        <h2>{title}</h2>
+      </div>
+      <button aria-label="Clear selection" onClick={onClose}>
+        ×
+      </button>
+    </header>
+  );
+}
+
 function ViewPanel({
   className,
   eyebrow,
@@ -2441,15 +2014,15 @@ function ViewPanel({
   children: React.ReactNode;
 }) {
   return (
-    <div className={`view-panel ${className}`}>
-      <div className="panel-heading">
+    <section className={`view-panel ${className}`}>
+      <header className="panel-heading">
         <div>
           <span className="view-label">{eyebrow}</span>
           <h2>{title}</h2>
         </div>
         {extra}
-      </div>
+      </header>
       <div className="canvas-wrap">{children}</div>
-    </div>
+    </section>
   );
 }

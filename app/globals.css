@@ -189,6 +189,132 @@ p {
   border-top: 1px solid var(--line);
 }
 
+.command-section {
+  padding-top: 0;
+  margin-top: 0;
+  border-top: 0;
+}
+
+.command-picker {
+  display: grid;
+  gap: 5px;
+}
+
+.command-picker > button {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 8px;
+  padding: 7px 8px;
+  text-align: left;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.command-picker > button > span {
+  grid-row: 1 / 3;
+  align-self: center;
+  color: var(--muted);
+  font-size: 19px;
+  text-align: center;
+}
+
+.command-picker > button strong {
+  font-size: 10px;
+}
+
+.command-picker > button small {
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.command-picker > button.active {
+  background: #edf6f5;
+  border-color: var(--teal);
+  box-shadow: inset 3px 0 0 var(--teal);
+}
+
+.command-picker > button.roof-command {
+  background: #fff8f2;
+  border-color: var(--orange);
+  box-shadow: inset 3px 0 0 var(--orange);
+}
+
+.active-command-card {
+  margin-top: 7px;
+  padding: 8px;
+  color: #126a70;
+  background: #edf6f5;
+  border-left: 2px solid var(--teal);
+  font-size: 8px;
+}
+
+.active-command-card > strong,
+.active-command-card > span {
+  display: block;
+}
+
+.active-command-card > span {
+  margin-top: 2px;
+  color: var(--muted);
+}
+
+.active-command-card > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.active-command-card button {
+  padding: 4px 6px;
+  color: var(--ink);
+  background: white;
+  border: 1px solid #9dc3c1;
+  border-radius: 3px;
+  font-size: 8px;
+  cursor: pointer;
+}
+
+.compact-form-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.compact-form-options button {
+  min-width: 0;
+  padding: 6px 4px;
+  text-align: center;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.compact-form-options strong,
+.compact-form-options small {
+  display: block;
+}
+
+.compact-form-options strong {
+  font-size: 9px;
+}
+
+.compact-form-options small {
+  display: none;
+}
+
+.compact-form-options button.active {
+  color: #a95829;
+  background: #fff8f2;
+  border-color: var(--orange);
+}
+
 .catalog-copy {
   margin-bottom: 8px;
   color: var(--muted);
@@ -1189,6 +1315,38 @@ canvas {
   color: var(--muted);
   font-size: 9px;
   line-height: 1.45;
+}
+
+.inspector-model-summary {
+  width: 100%;
+}
+
+.model-counts {
+  width: 100%;
+  margin: 22px 0 0;
+  padding: 0;
+  text-align: left;
+  border-top: 1px solid var(--line);
+}
+
+.model-counts div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.model-counts dt {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.model-counts dd {
+  margin: 0;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .detail-inspector-actions button {
