@@ -274,7 +274,7 @@ export default function Home() {
     { index: number; points: ScreenPoint[] }[]
   >([]);
   const formEaveRegions = useRef<
-    { index: number; start: ScreenPoint; end: ScreenPoint }[]
+    { index: number; points: ScreenPoint[] }[]
   >([]);
   const formRoofRegions = useRef<ScreenPoint[][]>([]);
   const orbitDrag = useRef<{
@@ -901,12 +901,20 @@ export default function Home() {
             : highestBase + rise,
         z: center.z,
       };
+      const cornerElevations = roofPoints.map((_, index) => {
+        const previousEdge =
+          (index + roofPoints.length - 1) % roofPoints.length;
+        return (
+          (edgeElevation(previousEdge) + edgeElevation(index)) / 2
+        );
+      });
       const faces = roofEdges.map((edge) => {
-        const startY = edgeElevation(edge.index);
-        const endY = edgeElevation(edge.index);
+        const startY = cornerElevations[edge.index];
+        const endY =
+          cornerElevations[(edge.index + 1) % cornerElevations.length];
+        const edgeMidpoint = midpoint(edge.start, edge.end);
         let target = peak;
         if (roofKind === "gable") {
-          const edgeMidpoint = midpoint(edge.start, edge.end);
           const distanceA = Math.hypot(
             edgeMidpoint.x - ridgeA.x,
             edgeMidpoint.z - ridgeA.z,
@@ -921,6 +929,11 @@ export default function Home() {
           index: edge.index,
           points: [
             { x: edge.start.x, y: startY, z: edge.start.z },
+            {
+              x: edgeMidpoint.x,
+              y: edgeElevation(edge.index),
+              z: edgeMidpoint.z,
+            },
             { x: edge.end.x, y: endY, z: edge.end.z },
             target,
           ],
@@ -961,33 +974,6 @@ export default function Home() {
           );
         });
 
-      roofPoints.forEach((point, index) => {
-        const previousElevation = edgeElevation(
-          (index + roofPoints.length - 1) % roofPoints.length,
-        );
-        const currentElevation = edgeElevation(index);
-        if (Math.abs(previousElevation - currentElevation) < 0.01) return;
-        drawPolygon(
-          context,
-          [
-            project({
-              x: point.x,
-              y: previousElevation,
-              z: point.z,
-            }),
-            project({
-              x: point.x,
-              y: currentElevation,
-              z: point.z,
-            }),
-            project(peak),
-          ],
-          "rgba(190, 99, 48, 0.34)",
-          "#8e4c28",
-          1,
-        );
-      });
-
       if (showTopology && roofKind === "gable") {
         context.strokeStyle = "#63371f";
         context.lineWidth = 1.5;
@@ -1003,15 +989,27 @@ export default function Home() {
         const eaveElevation = edgeElevation(edge.index);
         const start = project({
           x: edge.start.x,
-          y: eaveElevation,
+          y: cornerElevations[edge.index],
           z: edge.start.z,
+        });
+        const edgeMidpoint = midpoint(edge.start, edge.end);
+        const middle = project({
+          x: edgeMidpoint.x,
+          y: eaveElevation,
+          z: edgeMidpoint.z,
         });
         const end = project({
           x: edge.end.x,
-          y: eaveElevation,
+          y:
+            cornerElevations[
+              (edge.index + 1) % cornerElevations.length
+            ],
           z: edge.end.z,
         });
-        formEaveRegions.current.push({ index: edge.index, start, end });
+        formEaveRegions.current.push({
+          index: edge.index,
+          points: [start, middle, end],
+        });
         const selectedEdge =
           selection?.kind === "roof-edge" && selection.index === edge.index;
         context.strokeStyle = selectedEdge ? "#16838a" : "#a95829";
@@ -1019,12 +1017,13 @@ export default function Home() {
         context.lineCap = "round";
         context.beginPath();
         context.moveTo(start.x, start.y);
+        context.lineTo(middle.x, middle.y);
         context.lineTo(end.x, end.y);
         context.stroke();
         context.beginPath();
         context.arc(
-          (start.x + end.x) / 2,
-          (start.y + end.y) / 2,
+          middle.x,
+          middle.y,
           selectedEdge ? 6 : 3.5,
           0,
           Math.PI * 2,
@@ -1584,11 +1583,17 @@ export default function Home() {
                   };
                   const eave = formEaveRegions.current.find(
                     (region) =>
-                      pointToSegmentDistance(
-                        { x: pointer.x, z: pointer.y },
-                        { x: region.start.x, z: region.start.y },
-                        { x: region.end.x, z: region.end.y },
-                      ) <= 14,
+                      region.points.slice(1).some(
+                        (point, index) =>
+                          pointToSegmentDistance(
+                            { x: pointer.x, z: pointer.y },
+                            {
+                              x: region.points[index].x,
+                              z: region.points[index].y,
+                            },
+                            { x: point.x, z: point.y },
+                          ) <= 14,
+                      ),
                   );
                   if (eave) {
                     setSelection({ kind: "roof-edge", index: eave.index });
