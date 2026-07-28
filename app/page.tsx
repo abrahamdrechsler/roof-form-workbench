@@ -489,7 +489,7 @@ export default function Home() {
 
     context.fillStyle = "#fbfaf7";
     context.fillRect(0, 0, width, height);
-    const gridStep = scale * 2;
+    const gridStep = scale;
     context.strokeStyle = "#e9e6df";
     context.lineWidth = 1;
     for (
@@ -634,7 +634,7 @@ export default function Home() {
     context.textAlign = "left";
     context.fillStyle = "#716a61";
     context.font = "600 8px monospace";
-    context.fillText("2′ GRID", 14, 22);
+    context.fillText("12″ × 12″ SNAP GRID", 14, 22);
   }, [
     command,
     pointerWorld,
@@ -1003,8 +1003,8 @@ export default function Home() {
     const rect = canvas.getBoundingClientRect();
     const { scale, centerX, centerY } = planScaleRef.current;
     const point = {
-      x: Math.round(((event.clientX - rect.left - centerX) / scale) * 2) / 2,
-      z: Math.round(((event.clientY - rect.top - centerY) / scale) * 2) / 2,
+      x: Math.round((event.clientX - rect.left - centerX) / scale),
+      z: Math.round((event.clientY - rect.top - centerY) / scale),
     };
 
     if (command === "walls") {
@@ -1077,8 +1077,8 @@ export default function Home() {
     const rect = canvas.getBoundingClientRect();
     const { scale, centerX, centerY } = planScaleRef.current;
     setPointerWorld({
-      x: Math.round(((event.clientX - rect.left - centerX) / scale) * 2) / 2,
-      z: Math.round(((event.clientY - rect.top - centerY) / scale) * 2) / 2,
+      x: Math.round((event.clientX - rect.left - centerX) / scale),
+      z: Math.round((event.clientY - rect.top - centerY) / scale),
     });
   };
 
