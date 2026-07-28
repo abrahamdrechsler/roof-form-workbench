@@ -5,6 +5,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 type RoofKind = "gable" | "hip" | "shed";
 type EdgeRole = "bearing" | "gable" | "high" | "low";
 type ViewMode = "split" | "plan" | "form";
+type EaveDriver = "heel" | "seat";
+type EaveCondition = {
+  id: string;
+  name: string;
+  driver: EaveDriver;
+  height: number;
+  inset: number;
+};
 type Point3 = { x: number; y: number; z: number };
 type RoofFace = {
   id: string;
@@ -35,6 +43,23 @@ const PRESETS: Record<
 };
 
 const EDGE_LABELS = ["North", "East", "South", "West"];
+
+const INITIAL_EAVE_CONDITIONS: EaveCondition[] = [
+  {
+    id: "rafter-seat",
+    name: "Rafter · compact",
+    driver: "seat",
+    height: 0.75,
+    inset: 0.25,
+  },
+  {
+    id: "raised-heel",
+    name: "Raised heel · standard",
+    driver: "heel",
+    height: 1.5,
+    inset: 0.5,
+  },
+];
 
 function feetInches(value: number) {
   const feet = Math.floor(value);
@@ -122,6 +147,29 @@ function pointInPolygon(
     if (crosses) inside = !inside;
   }
   return inside;
+}
+
+function pointToSegmentDistance(
+  point: { x: number; y: number },
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+) {
+  const deltaX = end.x - start.x;
+  const deltaY = end.y - start.y;
+  const lengthSquared = deltaX * deltaX + deltaY * deltaY;
+  if (lengthSquared === 0) return Math.hypot(point.x - start.x, point.y - start.y);
+  const t = Math.max(
+    0,
+    Math.min(
+      1,
+      ((point.x - start.x) * deltaX + (point.y - start.y) * deltaY) /
+        lengthSquared,
+    ),
+  );
+  return Math.hypot(
+    point.x - (start.x + t * deltaX),
+    point.y - (start.y + t * deltaY),
+  );
 }
 
 function solveGable(
@@ -252,12 +300,18 @@ function makeRoofFaces(
   buildingWidth: number,
   buildingDepth: number,
   bearingElevations: number[],
+  overhangs: number[],
   pitch: number,
   roofResolved: boolean,
 ) {
   if (!roofResolved) return [];
   const w = buildingWidth / 2;
   const d = buildingDepth / 2;
+  const westExtent = -w - overhangs[3];
+  const eastExtent = w + overhangs[1];
+  const northExtent = -d - overhangs[0];
+  const southExtent = d + overhangs[2];
+  const slope = Math.max(pitch / 12, 0.001);
   const eastBase = bearingElevations[1];
   const westBase = bearingElevations[3];
   const gable = solveGable(
@@ -275,10 +329,18 @@ function makeRoofFaces(
         label: "West roof plane",
         color: "#d97834",
         points: [
-          { x: -w, y: gable.westBase, z: -d },
-          { x: -w, y: gable.westBase, z: d },
-          { x: gable.ridgeX, y: gable.ridgeElevation, z: d },
-          { x: gable.ridgeX, y: gable.ridgeElevation, z: -d },
+          {
+            x: westExtent,
+            y: gable.westBase - overhangs[3] * slope,
+            z: northExtent,
+          },
+          {
+            x: westExtent,
+            y: gable.westBase - overhangs[3] * slope,
+            z: southExtent,
+          },
+          { x: gable.ridgeX, y: gable.ridgeElevation, z: southExtent },
+          { x: gable.ridgeX, y: gable.ridgeElevation, z: northExtent },
         ],
       },
       {
@@ -286,10 +348,18 @@ function makeRoofFaces(
         label: "East roof plane",
         color: "#ef9e67",
         points: [
-          { x: gable.ridgeX, y: gable.ridgeElevation, z: -d },
-          { x: gable.ridgeX, y: gable.ridgeElevation, z: d },
-          { x: w, y: gable.eastBase, z: d },
-          { x: w, y: gable.eastBase, z: -d },
+          { x: gable.ridgeX, y: gable.ridgeElevation, z: northExtent },
+          { x: gable.ridgeX, y: gable.ridgeElevation, z: southExtent },
+          {
+            x: eastExtent,
+            y: gable.eastBase - overhangs[1] * slope,
+            z: southExtent,
+          },
+          {
+            x: eastExtent,
+            y: gable.eastBase - overhangs[1] * slope,
+            z: northExtent,
+          },
         ],
       },
     );
@@ -297,10 +367,10 @@ function makeRoofFaces(
 
   if (kind === "hip") {
     const rectangle: PlanPoint[] = [
-      { x: -w, z: -d },
-      { x: w, z: -d },
-      { x: w, z: d },
-      { x: -w, z: d },
+      { x: westExtent, z: northExtent },
+      { x: eastExtent, z: northExtent },
+      { x: eastExtent, z: southExtent },
+      { x: westExtent, z: southExtent },
     ];
     const planes = makeHipPlaneDefinitions(
       w,
@@ -339,10 +409,26 @@ function makeRoofFaces(
       label: "Shed roof plane",
       color: "#dd8247",
       points: [
-        { x: -w, y: westBase, z: -d },
-        { x: -w, y: westBase, z: d },
-        { x: w, y: eastBase, z: d },
-        { x: w, y: eastBase, z: -d },
+        {
+          x: westExtent,
+          y: westBase - overhangs[3] * slope,
+          z: northExtent,
+        },
+        {
+          x: westExtent,
+          y: westBase - overhangs[3] * slope,
+          z: southExtent,
+        },
+        {
+          x: eastExtent,
+          y: eastBase + overhangs[1] * slope,
+          z: southExtent,
+        },
+        {
+          x: eastExtent,
+          y: eastBase + overhangs[1] * slope,
+          z: northExtent,
+        },
       ],
     });
   }
@@ -357,6 +443,8 @@ export default function Home() {
   const [bearingOffsets, setBearingOffsets] = useState([
     0.75, 0.75, 0.75, 0.75,
   ]);
+  const [bearingInsets, setBearingInsets] = useState([0.25, 0.25, 0.25, 0.25]);
+  const [edgeOverhangs, setEdgeOverhangs] = useState([1.5, 1.5, 1.5, 1.5]);
   const [pitch, setPitch] = useState(6);
   const [selectedEdge, setSelectedEdge] = useState(1);
   const [selectedPlane, setSelectedPlane] = useState("east-plane");
@@ -367,11 +455,31 @@ export default function Home() {
   const [viewMode, setViewMode] = useState<ViewMode>("split");
   const [selected3DWall, setSelected3DWall] = useState<number | null>(null);
   const [wallHeightDraft, setWallHeightDraft] = useState("9.00");
+  const [eaveCatalog, setEaveCatalog] = useState<EaveCondition[]>(
+    INITIAL_EAVE_CONDITIONS,
+  );
+  const [edgeEaveIds, setEdgeEaveIds] = useState([
+    "rafter-seat",
+    "rafter-seat",
+    "rafter-seat",
+    "rafter-seat",
+  ]);
+  const [selected3DEave, setSelected3DEave] = useState<number | null>(null);
+  const [showEaveCreator, setShowEaveCreator] = useState(false);
+  const [eaveDraft, setEaveDraft] = useState({
+    name: "New eave condition",
+    driver: "heel" as EaveDriver,
+    height: 1.5,
+    inset: 0.5,
+  });
 
   const planRef = useRef<HTMLCanvasElement>(null);
   const formRef = useRef<HTMLCanvasElement>(null);
   const sectionRef = useRef<HTMLCanvasElement>(null);
   const formWallRegions = useRef<
+    { edge: number; points: { x: number; y: number }[] }[]
+  >([]);
+  const formEaveRegions = useRef<
     { edge: number; points: { x: number; y: number }[] }[]
   >([]);
   const orbitDrag = useRef<{
@@ -385,8 +493,12 @@ export default function Home() {
 
   const roles = PRESETS[roofKind].roles;
   const bearingElevations = plateHeights.map(
-    (height, index) => height + bearingOffsets[index],
+    (height, index) =>
+      height +
+      bearingOffsets[index] -
+      bearingInsets[index] * (Math.max(pitch, 0.001) / 12),
   );
+  const overhangs = edgeOverhangs;
   const effectivePitch =
     roofKind === "shed"
       ? (Math.abs(bearingElevations[1] - bearingElevations[3]) /
@@ -424,6 +536,8 @@ export default function Home() {
     setBuildingDepth(40);
     setPlateHeights([9, 9, 9, 9]);
     setBearingOffsets([0.75, 0.75, 0.75, 0.75]);
+    setBearingInsets([0.25, 0.25, 0.25, 0.25]);
+    setEdgeOverhangs([1.5, 1.5, 1.5, 1.5]);
     setPitch(6);
     setSelectedEdge(1);
     setSelectedPlane("east-plane");
@@ -433,6 +547,15 @@ export default function Home() {
     setOrbit({ yaw: -42, pitch: 24 });
     setSelected3DWall(null);
     setWallHeightDraft("9.00");
+    setEaveCatalog(INITIAL_EAVE_CONDITIONS);
+    setEdgeEaveIds([
+      "rafter-seat",
+      "rafter-seat",
+      "rafter-seat",
+      "rafter-seat",
+    ]);
+    setSelected3DEave(null);
+    setShowEaveCreator(false);
   };
 
   const setSelectedPlateHeight = (value: number) => {
@@ -461,14 +584,38 @@ export default function Home() {
     setPlateHeights([value, value, value, value]);
   };
 
-  const setSelectedBearingOffset = (value: number) => {
+  const assignEaveCondition = (edge: number, conditionId: string) => {
+    const condition = eaveCatalog.find((item) => item.id === conditionId);
+    if (!condition) return;
+    setEdgeEaveIds((current) =>
+      current.map((id, index) => (index === edge ? conditionId : id)),
+    );
     setBearingOffsets((current) =>
-      current.map((offset, index) => (index === selectedEdge ? value : offset)),
+      current.map((offset, index) =>
+        index === edge ? condition.height : offset,
+      ),
+    );
+    setBearingInsets((current) =>
+      current.map((inset, index) =>
+        index === edge ? condition.inset : inset,
+      ),
     );
   };
 
-  const setAllBearingOffsets = (value: number) => {
-    setBearingOffsets([value, value, value, value]);
+  const saveEaveCondition = () => {
+    const safeHeight = Number.isFinite(eaveDraft.height)
+      ? eaveDraft.height
+      : 0;
+    const safeInset = Number.isFinite(eaveDraft.inset) ? eaveDraft.inset : 0;
+    const condition: EaveCondition = {
+      id: `eave-${Date.now()}`,
+      name: eaveDraft.name.trim() || "Untitled eave",
+      driver: eaveDraft.driver,
+      height: Math.max(0, Math.min(6, safeHeight)),
+      inset: Math.max(-2, Math.min(4, safeInset)),
+    };
+    setEaveCatalog((current) => [...current, condition]);
+    setShowEaveCreator(false);
   };
 
   const setAuthoredPitch = (value: number) => {
@@ -479,6 +626,7 @@ export default function Home() {
           index === 1
             ? current[3] +
               bearingOffsets[3] +
+              (bearingInsets[1] - bearingInsets[3]) * (value / 12) +
               buildingWidth * (value / 12) -
               bearingOffsets[1]
             : height,
@@ -496,20 +644,41 @@ export default function Home() {
     drawGrid(context, width, height);
 
     const margin = 64;
+    const roofWidth = buildingWidth + overhangs[3] + overhangs[1];
+    const roofDepth = buildingDepth + overhangs[0] + overhangs[2];
     const scale = Math.min(
-      (width - margin * 2) / buildingWidth,
-      (height - margin * 2) / buildingDepth,
+      (width - margin * 2) / roofWidth,
+      (height - margin * 2) / roofDepth,
     );
     const rectWidth = buildingWidth * scale;
     const rectHeight = buildingDepth * scale;
-    const left = (width - rectWidth) / 2;
-    const top = (height - rectHeight) / 2;
+    const roofLeft = (width - roofWidth * scale) / 2;
+    const roofTop = (height - roofDepth * scale) / 2;
+    const left = roofLeft + overhangs[3] * scale;
+    const top = roofTop + overhangs[0] * scale;
     const right = left + rectWidth;
     const bottom = top + rectHeight;
     const middle = (top + bottom) / 2;
+    const roofRight = right + overhangs[1] * scale;
+    const roofBottom = bottom + overhangs[2] * scale;
 
     context.fillStyle = "#f8f5ee";
     context.fillRect(left, top, rectWidth, rectHeight);
+
+    const roofEdges = [
+      [{ x: roofLeft, y: roofTop }, { x: roofRight, y: roofTop }],
+      [{ x: roofRight, y: roofTop }, { x: roofRight, y: roofBottom }],
+      [{ x: roofRight, y: roofBottom }, { x: roofLeft, y: roofBottom }],
+      [{ x: roofLeft, y: roofBottom }, { x: roofLeft, y: roofTop }],
+    ];
+    roofEdges.forEach((edge, index) => {
+      context.strokeStyle = index === selectedEdge ? "#16838a" : "#d97834";
+      context.lineWidth = index === selectedEdge ? 3.5 : 2;
+      context.beginPath();
+      context.moveTo(edge[0].x, edge[0].y);
+      context.lineTo(edge[1].x, edge[1].y);
+      context.stroke();
+    });
 
     const edges = [
       [{ x: left, y: top }, { x: right, y: top }],
@@ -571,14 +740,15 @@ export default function Home() {
     } else if (roofKind === "gable") {
       const ridgePlanX =
         left + ((gableSolution.ridgeX + buildingWidth / 2) / buildingWidth) * rectWidth;
-      context.moveTo(ridgePlanX, top);
-      context.lineTo(ridgePlanX, bottom);
+      context.moveTo(ridgePlanX, roofTop);
+      context.lineTo(ridgePlanX, roofBottom);
     } else if (roofKind === "hip") {
       makeRoofFaces(
         roofKind,
         buildingWidth,
         buildingDepth,
         bearingElevations,
+        overhangs,
         effectivePitch,
         true,
       ).forEach((face) => {
@@ -615,9 +785,12 @@ export default function Home() {
     buildingDepth,
     buildingWidth,
     bearingElevations,
+    bearingInsets,
+    bearingOffsets,
     effectivePitch,
     gableSolution.ridgeX,
     plateHeights,
+    overhangs,
     roofKind,
     roofResolved,
     selectedEdge,
@@ -813,6 +986,7 @@ export default function Home() {
       buildingWidth,
       buildingDepth,
       bearingElevations,
+      overhangs,
       effectivePitch,
       roofResolved,
     ).sort(
@@ -854,6 +1028,90 @@ export default function Home() {
       );
     }
 
+    const westExtent = -w - overhangs[3];
+    const eastExtent = w + overhangs[1];
+    const northExtent = -d - overhangs[0];
+    const southExtent = d + overhangs[2];
+    const roofSurfaceHeight = (x: number, z: number) =>
+      roofKind === "hip"
+        ? hipRoofHeight(
+            x,
+            z,
+            w,
+            d,
+            bearingElevations,
+            effectivePitch,
+          )
+        : roofHeightAtX(x);
+    const northSouthBreaks =
+      roofKind === "gable"
+        ? [westExtent, gableSolution.ridgeX, eastExtent]
+        : [westExtent, eastExtent];
+    const eaveEdges: { edge: number; points: Point3[] }[] = [
+      {
+        edge: 0,
+        points: northSouthBreaks.map((x) => ({
+          x,
+          y: roofSurfaceHeight(x, northExtent),
+          z: northExtent,
+        })),
+      },
+      {
+        edge: 1,
+        points: [
+          {
+            x: eastExtent,
+            y: roofSurfaceHeight(eastExtent, northExtent),
+            z: northExtent,
+          },
+          {
+            x: eastExtent,
+            y: roofSurfaceHeight(eastExtent, southExtent),
+            z: southExtent,
+          },
+        ],
+      },
+      {
+        edge: 2,
+        points: [...northSouthBreaks].reverse().map((x) => ({
+          x,
+          y: roofSurfaceHeight(x, southExtent),
+          z: southExtent,
+        })),
+      },
+      {
+        edge: 3,
+        points: [
+          {
+            x: westExtent,
+            y: roofSurfaceHeight(westExtent, southExtent),
+            z: southExtent,
+          },
+          {
+            x: westExtent,
+            y: roofSurfaceHeight(westExtent, northExtent),
+            z: northExtent,
+          },
+        ],
+      },
+    ];
+    formEaveRegions.current = eaveEdges.map((edge) => ({
+      edge: edge.edge,
+      points: edge.points.map(project),
+    }));
+    formEaveRegions.current.forEach((edge) => {
+      context.strokeStyle =
+        edge.edge === selected3DEave ? "#16838a" : "#a95829";
+      context.lineWidth = edge.edge === selected3DEave ? 4 : 2;
+      context.lineCap = "round";
+      context.beginPath();
+      context.moveTo(edge.points[0].x, edge.points[0].y);
+      edge.points
+        .slice(1)
+        .forEach((point) => context.lineTo(point.x, point.y));
+      context.stroke();
+    });
+
     if (!roofResolved) {
       context.fillStyle = "#b45427";
       context.font = "700 10px monospace";
@@ -864,25 +1122,29 @@ export default function Home() {
     }
 
     if (showDatums) {
-      const edgePoints = (edge: number, elevation: number): Point3[] => {
+      const edgePoints = (
+        edge: number,
+        elevation: number,
+        inset = 0,
+      ): Point3[] => {
         if (edge === 0)
           return [
-            { x: -w, y: elevation, z: -d },
-            { x: w, y: elevation, z: -d },
+            { x: -w, y: elevation, z: -d + inset },
+            { x: w, y: elevation, z: -d + inset },
           ];
         if (edge === 1)
           return [
-            { x: w, y: elevation, z: -d },
-            { x: w, y: elevation, z: d },
+            { x: w - inset, y: elevation, z: -d },
+            { x: w - inset, y: elevation, z: d },
           ];
         if (edge === 2)
           return [
-            { x: w, y: elevation, z: d },
-            { x: -w, y: elevation, z: d },
+            { x: w, y: elevation, z: d - inset },
+            { x: -w, y: elevation, z: d - inset },
           ];
         return [
-          { x: -w, y: elevation, z: d },
-          { x: -w, y: elevation, z: -d },
+          { x: -w + inset, y: elevation, z: d },
+          { x: -w + inset, y: elevation, z: -d },
         ];
       };
       const plateRail = edgePoints(selectedEdge, plateHeights[selectedEdge]).map(project);
@@ -899,7 +1161,8 @@ export default function Home() {
       if (selectedDrivesRoof) {
         const bearingRail = edgePoints(
           selectedEdge,
-          bearingElevations[selectedEdge],
+          plateHeights[selectedEdge] + bearingOffsets[selectedEdge],
+          bearingInsets[selectedEdge],
         ).map(project);
         context.setLineDash([5, 4]);
         context.strokeStyle = "#d97834";
@@ -911,7 +1174,7 @@ export default function Home() {
         context.setLineDash([]);
         context.fillStyle = "#a95829";
         context.fillText(
-          "ROOF BEARING BASE",
+          "WALL / ROOF LOCATOR",
           bearingRail[1].x - 99,
           bearingRail[1].y - 8,
         );
@@ -925,9 +1188,12 @@ export default function Home() {
     buildingDepth,
     buildingWidth,
     bearingElevations,
+    bearingInsets,
+    bearingOffsets,
     effectivePitch,
     gableSolution.ridgeX,
     orbit,
+    overhangs,
     plateHeights,
     ridgeElevation,
     roofResolved,
@@ -936,6 +1202,7 @@ export default function Home() {
     selectedDrivesRoof,
     selectedPlane,
     selected3DWall,
+    selected3DEave,
     showDatums,
     showTopology,
     showWalls,
@@ -1074,6 +1341,7 @@ export default function Home() {
           index === 1
             ? current[3] +
               bearingOffsets[3] +
+              (bearingInsets[1] - bearingInsets[3]) * (pitch / 12) +
               buildingWidth * (pitch / 12) -
               bearingOffsets[1]
             : height,
@@ -1184,22 +1452,110 @@ export default function Home() {
               output={`${effectivePitch.toFixed(1)}:12`}
               onChange={setAuthoredPitch}
             />
-            <Range
-              label="Level roof-base offsets"
-              value={
-                bearingOffsets.reduce((sum, offset) => sum + offset, 0) /
-                bearingOffsets.length
-              }
-              min={0}
-              max={12}
-              step={0.25}
-              output="Set all edges"
-              onChange={setAllBearingOffsets}
-            />
+          </div>
+
+          <div className="control-section eave-catalog-section">
+            <ControlHeading number="04" title="Eave condition catalog" />
+            <p className="catalog-copy">
+              Saved wall-section locators. Assign one after selecting a roof
+              edge.
+            </p>
+            <div className="eave-catalog-list">
+              {eaveCatalog.map((condition) => (
+                <div className="eave-catalog-item" key={condition.id}>
+                  <span className="condition-diagram">
+                    <i className="condition-wall" />
+                    <i className="condition-roof" />
+                    <i className="condition-point" />
+                  </span>
+                  <span>
+                    <strong>{condition.name}</strong>
+                    <small>
+                      {condition.driver === "heel" ? "Heel" : "Seat"} · X{" "}
+                      {feetInches(condition.inset)} · Y +
+                      {feetInches(condition.height)}
+                    </small>
+                  </span>
+                </div>
+              ))}
+            </div>
+            {showEaveCreator ? (
+              <div className="eave-creator">
+                <input
+                  aria-label="Eave condition name"
+                  value={eaveDraft.name}
+                  onChange={(event) =>
+                    setEaveDraft((current) => ({
+                      ...current,
+                      name: event.target.value,
+                    }))
+                  }
+                />
+                <div className="eave-creator-row">
+                  <select
+                    aria-label="Structural locator type"
+                    value={eaveDraft.driver}
+                    onChange={(event) =>
+                      setEaveDraft((current) => ({
+                        ...current,
+                        driver: event.target.value as EaveDriver,
+                      }))
+                    }
+                  >
+                    <option value="heel">Heel height</option>
+                    <option value="seat">Seat cut</option>
+                  </select>
+                  <label>
+                    X
+                    <input
+                      type="number"
+                      step={0.25}
+                      value={eaveDraft.inset}
+                      onChange={(event) =>
+                        setEaveDraft((current) => ({
+                          ...current,
+                          inset: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label>
+                    Y
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.25}
+                      value={eaveDraft.height}
+                      onChange={(event) =>
+                        setEaveDraft((current) => ({
+                          ...current,
+                          height: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </label>
+                </div>
+                <div className="eave-creator-actions">
+                  <button onClick={() => setShowEaveCreator(false)}>
+                    Cancel
+                  </button>
+                  <button className="save-condition" onClick={saveEaveCondition}>
+                    Save type
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                className="add-condition-button"
+                onClick={() => setShowEaveCreator(true)}
+              >
+                + New condition
+              </button>
+            )}
           </div>
 
           <div className="control-section layer-section">
-            <ControlHeading number="04" title="View" />
+            <ControlHeading number="05" title="View" />
             <Check label="Wall volume" value={showWalls} onChange={setShowWalls} />
             <Check
               label="Construction datums"
@@ -1234,9 +1590,27 @@ export default function Home() {
                 const canvas = planRef.current;
                 if (!canvas) return;
                 const rect = canvas.getBoundingClientRect();
-                const rx = (event.clientX - rect.left) / rect.width;
-                const ry = (event.clientY - rect.top) / rect.height;
-                const distances = [ry, 1 - rx, 1 - ry, rx];
+                const margin = 64;
+                const roofWidth =
+                  buildingWidth + overhangs[3] + overhangs[1];
+                const roofDepth =
+                  buildingDepth + overhangs[0] + overhangs[2];
+                const scale = Math.min(
+                  (rect.width - margin * 2) / roofWidth,
+                  (rect.height - margin * 2) / roofDepth,
+                );
+                const roofLeft = (rect.width - roofWidth * scale) / 2;
+                const roofTop = (rect.height - roofDepth * scale) / 2;
+                const roofRight = roofLeft + roofWidth * scale;
+                const roofBottom = roofTop + roofDepth * scale;
+                const x = event.clientX - rect.left;
+                const y = event.clientY - rect.top;
+                const distances = [
+                  Math.abs(y - roofTop),
+                  Math.abs(x - roofRight),
+                  Math.abs(y - roofBottom),
+                  Math.abs(x - roofLeft),
+                ];
                 setSelectedEdge(distances.indexOf(Math.min(...distances)));
               }}
             />
@@ -1244,7 +1618,7 @@ export default function Home() {
             <aside className="edge-inspector">
               <div className="edge-inspector-heading">
                 <div>
-                  <span className="view-label">SELECTED WALL</span>
+                  <span className="view-label">SELECTED WALL / ROOF EDGE</span>
                   <h3>{EDGE_LABELS[selectedEdge]} edge</h3>
                 </div>
                 <span className="selection-index">E{selectedEdge + 1}</span>
@@ -1276,21 +1650,40 @@ export default function Home() {
                 output={feetInches(plateHeights[selectedEdge])}
                 onChange={setSelectedPlateHeight}
               />
-              {selectedDrivesRoof ? (
-                <Range
-                  label="Roof base above plate"
-                  value={bearingOffsets[selectedEdge]}
-                  min={0}
-                  max={12}
-                  step={0.25}
-                  output={`+ ${feetInches(bearingOffsets[selectedEdge])}`}
-                  onChange={setSelectedBearingOffset}
-                />
-              ) : (
-                <p className="relationship-note">
-                  This wall is clipped by the solved roof.
-                </p>
-              )}
+              <label className="condition-select">
+                <span>Wall / roof condition</span>
+                <select
+                  value={edgeEaveIds[selectedEdge]}
+                  onChange={(event) =>
+                    assignEaveCondition(selectedEdge, event.target.value)
+                  }
+                >
+                  {eaveCatalog.map((condition) => (
+                    <option key={condition.id} value={condition.id}>
+                      {condition.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="condition-coordinate compact">
+                <span>X {feetInches(bearingInsets[selectedEdge])} inboard</span>
+                <span>Y +{feetInches(bearingOffsets[selectedEdge])}</span>
+              </div>
+              <Range
+                label="Independent overhang"
+                value={edgeOverhangs[selectedEdge]}
+                min={0}
+                max={8}
+                step={0.25}
+                output={feetInches(edgeOverhangs[selectedEdge])}
+                onChange={(value) =>
+                  setEdgeOverhangs((current) =>
+                    current.map((overhang, index) =>
+                      index === selectedEdge ? value : overhang,
+                    ),
+                  )
+                }
+              />
             </aside>
             </ViewPanel>
           )}
@@ -1326,16 +1719,36 @@ export default function Home() {
                   x: event.clientX - rect.left,
                   y: event.clientY - rect.top,
                 };
+                const eave = formEaveRegions.current.find((region) =>
+                  region.points
+                    .slice(1)
+                    .some(
+                      (point, index) =>
+                        pointToSegmentDistance(
+                          pointer,
+                          region.points[index],
+                          point,
+                        ) <= 9,
+                    ),
+                );
+                if (eave) {
+                  setSelectedEdge(eave.edge);
+                  setSelected3DEave(eave.edge);
+                  setSelected3DWall(null);
+                  return;
+                }
                 const wall = [...formWallRegions.current]
                   .reverse()
                   .find((region) => pointInPolygon(pointer, region.points));
                 if (wall) {
                   setSelectedEdge(wall.edge);
                   setSelected3DWall(wall.edge);
+                  setSelected3DEave(null);
                   setWallHeightDraft(plateHeights[wall.edge].toFixed(2));
                   return;
                 }
                 setSelected3DWall(null);
+                setSelected3DEave(null);
                 setSelectedPlane(
                   roofKind === "shed"
                     ? "shed-plane"
@@ -1393,6 +1806,69 @@ export default function Home() {
             <div className="orientation">
               {Math.round(((orbit.yaw % 360) + 360) % 360)}°
             </div>
+            {selected3DEave !== null && (
+              <div className="wall-height-popover eave-assignment-popover">
+                <div className="wall-height-popover-heading">
+                  <div>
+                    <span className="view-label">SELECTED ROOF EDGE</span>
+                    <strong>{EDGE_LABELS[selected3DEave]} eave</strong>
+                  </div>
+                  <button
+                    aria-label="Close eave condition editor"
+                    onClick={() => setSelected3DEave(null)}
+                  >
+                    ×
+                  </button>
+                </div>
+                <label>
+                  <span>Wall / roof condition</span>
+                  <select
+                    value={edgeEaveIds[selected3DEave]}
+                    onChange={(event) =>
+                      assignEaveCondition(selected3DEave, event.target.value)
+                    }
+                  >
+                    {eaveCatalog.map((condition) => (
+                      <option key={condition.id} value={condition.id}>
+                        {condition.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="condition-coordinate">
+                  <span>
+                    X {feetInches(bearingInsets[selected3DEave])} inboard
+                  </span>
+                  <span>
+                    Y +{feetInches(bearingOffsets[selected3DEave])} above plate
+                  </span>
+                </div>
+                <label>
+                  <span>Independent overhang</span>
+                  <div className="height-input">
+                    <input
+                      type="number"
+                      min={0}
+                      max={8}
+                      step={0.25}
+                      value={edgeOverhangs[selected3DEave]}
+                      onChange={(event) => {
+                        const nextValue = Number(event.target.value);
+                        if (!Number.isFinite(nextValue)) return;
+                        setEdgeOverhangs((current) =>
+                          current.map((overhang, index) =>
+                            index === selected3DEave
+                              ? Math.max(0, Math.min(8, nextValue))
+                              : overhang,
+                          ),
+                        );
+                      }}
+                    />
+                    <span>ft</span>
+                  </div>
+                </label>
+              </div>
+            )}
             {showWalls && selected3DWall !== null && (
               <div className="wall-height-popover">
                 <div className="wall-height-popover-heading">
@@ -1466,12 +1942,13 @@ export default function Home() {
             buildingWidth,
             buildingDepth,
             bearingElevations,
+            overhangs,
             effectivePitch,
             roofResolved,
           ).length}{" "}
           planes · {roofResolved ? 1 : 0} structural form
         </span>
-        <span>Eaves and finish assemblies deferred</span>
+        <span>Eave conditions assigned per roof edge</span>
       </footer>
     </main>
   );
