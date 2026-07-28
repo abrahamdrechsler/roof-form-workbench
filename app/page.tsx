@@ -905,9 +905,7 @@ export default function Home() {
       });
       const edgeProfiles = roofEdges.map((edge) => {
         const length = segmentLength(edge.start, edge.end);
-        const transitionRun = Math.min(4, length * 0.25);
-        const transitionFraction =
-          length > 0 ? transitionRun / length : 0;
+        const transitionFraction = length > 0 ? 0.2 : 0;
         const pointAlongEdge = (amount: number) => ({
           x: edge.start.x + (edge.end.x - edge.start.x) * amount,
           z: edge.start.z + (edge.end.z - edge.start.z) * amount,
@@ -943,7 +941,7 @@ export default function Home() {
           ],
         };
       });
-      const faces = edgeProfiles.map(({ edge, points }) => {
+      const faces = edgeProfiles.flatMap(({ edge, points }) => {
         const edgeMidpoint = midpoint(edge.start, edge.end);
         let target = peak;
         if (roofKind === "gable") {
@@ -957,10 +955,34 @@ export default function Home() {
           );
           target = distanceA < distanceB ? ridgeA : ridgeB;
         }
-        return {
-          index: edge.index,
-          points: [...points, target],
-        };
+        const startTransitions =
+          Math.abs(points[0].y - points[1].y) > 0.001;
+        const endTransitions =
+          Math.abs(points[2].y - points[3].y) > 0.001;
+        const mainStart = startTransitions ? points[1] : points[0];
+        const mainEnd = endTransitions ? points[2] : points[3];
+        return [
+          ...(startTransitions
+            ? [
+                {
+                  index: edge.index,
+                  points: [points[0], points[1], target],
+                },
+              ]
+            : []),
+          {
+            index: edge.index,
+            points: [mainStart, mainEnd, target],
+          },
+          ...(endTransitions
+            ? [
+                {
+                  index: edge.index,
+                  points: [points[2], points[3], target],
+                },
+              ]
+            : []),
+        ];
       });
       faces
         .sort((a, b) => {
@@ -974,7 +996,7 @@ export default function Home() {
             ) / face.points.length;
           return depth(a) - depth(b);
         })
-        .forEach((face, order) => {
+        .forEach((face) => {
           const selectedEdge =
             selection?.kind === "roof-edge" &&
             selection.index === face.index;
@@ -986,10 +1008,10 @@ export default function Home() {
             selectedEdge
               ? "#d97834"
               : selection?.kind === "roof"
-                ? order % 2
+                ? face.index % 2
                   ? "#e89a65"
                   : "#d97f45"
-              : order % 2
+              : face.index % 2
                 ? "#ef9e67"
                 : "#df8347",
             selectedEdge ? "#171512" : "#9b572c",
