@@ -856,80 +856,116 @@ export default function Home() {
     formEaveRegions.current = [];
     formRoofRegions.current = [];
     if (roofClosed && roofPoints.length >= 3) {
-      const averageRadius =
-        roofPoints.reduce(
-          (sum, point) =>
-            sum + Math.hypot(point.x - center.x, point.z - center.z),
-          0,
-        ) / roofPoints.length;
-      const rise = Math.max(2, averageRadius * (pitch / 12));
       const bounds = roofBounds;
       const dominantX = dominantRoofAxisIsX;
+      const roofCenter = {
+        x: (bounds.minX + bounds.maxX) / 2,
+        z: (bounds.minZ + bounds.maxZ) / 2,
+      };
+      const width = bounds.maxX - bounds.minX;
+      const depth = bounds.maxZ - bounds.minZ;
+      const nominalSlope = Math.max(0.01, pitch / 12);
+      const shortSpan = Math.min(width, depth);
+      const ridgeInset = shortSpan / 2;
+      const rise = Math.max(0.25, ridgeInset * nominalSlope);
       const ridgeA: Point3 = dominantX
         ? {
-            x: bounds.minX + (bounds.maxX - bounds.minX) * 0.28,
+            x: bounds.minX + ridgeInset,
             y: roofBase + rise,
-            z: center.z,
+            z: roofCenter.z,
           }
         : {
-            x: center.x,
+            x: roofCenter.x,
             y: roofBase + rise,
-            z: bounds.minZ + (bounds.maxZ - bounds.minZ) * 0.28,
+            z: bounds.minZ + ridgeInset,
           };
       const ridgeB: Point3 = dominantX
         ? {
-            x: bounds.maxX - (bounds.maxX - bounds.minX) * 0.28,
+            x: bounds.maxX - ridgeInset,
             y: roofBase + rise,
-            z: center.z,
+            z: roofCenter.z,
           }
         : {
-            x: center.x,
+            x: roofCenter.x,
             y: roofBase + rise,
-            z: bounds.maxZ - (bounds.maxZ - bounds.minZ) * 0.28,
+            z: bounds.maxZ - ridgeInset,
           };
       const peak: Point3 = {
-        x: center.x,
+        x: roofCenter.x,
         y:
           roofKind === "shed"
             ? roofBase + rise * 0.45
             : roofBase + rise,
-        z: center.z,
+        z: roofCenter.z,
       };
-      const cornerElevations = roofPoints.map((_, index) => {
-        const previousEdge =
-          (index + roofPoints.length - 1) % roofPoints.length;
-        const previousElevation = edgeElevation(previousEdge);
-        const currentElevation = edgeElevation(index);
-        const previousChange = Math.abs(previousElevation - roofBase);
-        const currentChange = Math.abs(currentElevation - roofBase);
-        return currentChange >= previousChange
-          ? currentElevation
-          : previousElevation;
-      });
       const edgeProfiles = roofEdges.map((edge) => {
+        const length = segmentLength(edge.start, edge.end);
+        const eaveElevation = edgeElevation(edge.index);
+        const transitionRun = Math.min(
+          length * 0.45,
+          Math.abs(eaveElevation - roofBase) / nominalSlope,
+        );
+        const transitionFraction =
+          length > 0 ? transitionRun / length : 0;
+        const pointAlongEdge = (amount: number) => ({
+          x: edge.start.x + (edge.end.x - edge.start.x) * amount,
+          z: edge.start.z + (edge.end.z - edge.start.z) * amount,
+        });
+        const plateauStart = pointAlongEdge(transitionFraction);
+        const plateauEnd = pointAlongEdge(1 - transitionFraction);
         return {
           edge,
+          hasTransitions: transitionFraction > 0.0001,
           points: [
             {
               x: edge.start.x,
-              y: cornerElevations[edge.index],
+              y: roofBase,
               z: edge.start.z,
             },
             {
+              x: plateauStart.x,
+              y: eaveElevation,
+              z: plateauStart.z,
+            },
+            {
+              x: plateauEnd.x,
+              y: eaveElevation,
+              z: plateauEnd.z,
+            },
+            {
               x: edge.end.x,
-              y:
-                cornerElevations[
-                  (edge.index + 1) % cornerElevations.length
-                ],
+              y: roofBase,
               z: edge.end.z,
             },
           ],
         };
       });
-      const faces = edgeProfiles.map(({ edge, points }) => {
+      const nearestRidgeEnd = (point: Point2) =>
+        dominantX
+          ? Math.abs(point.x - ridgeA.x) <=
+            Math.abs(point.x - ridgeB.x)
+            ? ridgeA
+            : ridgeB
+          : Math.abs(point.z - ridgeA.z) <=
+              Math.abs(point.z - ridgeB.z)
+            ? ridgeA
+            : ridgeB;
+      const faces = edgeProfiles.flatMap(
+        ({ edge, points, hasTransitions }) => {
         const edgeMidpoint = midpoint(edge.start, edge.end);
-        let target = peak;
-        if (roofKind === "gable") {
+        const runsAlongRidge = dominantX
+          ? Math.abs(edge.end.x - edge.start.x) >=
+            Math.abs(edge.end.z - edge.start.z)
+          : Math.abs(edge.end.z - edge.start.z) >=
+            Math.abs(edge.end.x - edge.start.x);
+        let targetStart = peak;
+        let targetEnd = peak;
+        if (roofKind === "hip") {
+          targetStart = nearestRidgeEnd(edge.start);
+          targetEnd = runsAlongRidge
+            ? nearestRidgeEnd(edge.end)
+            : targetStart;
+        } else if (roofKind === "gable") {
           const distanceA = Math.hypot(
             edgeMidpoint.x - ridgeA.x,
             edgeMidpoint.z - ridgeA.z,
@@ -938,13 +974,37 @@ export default function Home() {
             edgeMidpoint.x - ridgeB.x,
             edgeMidpoint.z - ridgeB.z,
           );
-          target = distanceA < distanceB ? ridgeA : ridgeB;
+          targetStart = distanceA < distanceB ? ridgeA : ridgeB;
+          targetEnd = targetStart;
         }
-        return {
-          index: edge.index,
-          points: [...points, target],
-        };
-      });
+        const mainTargets =
+          roofKind === "hip" && runsAlongRidge
+            ? [targetEnd, targetStart]
+            : [targetStart];
+        return [
+          ...(hasTransitions
+            ? [
+                {
+                  index: edge.index,
+                  points: [points[0], points[1], targetStart],
+                },
+              ]
+            : []),
+          {
+            index: edge.index,
+            points: [points[1], points[2], ...mainTargets],
+          },
+          ...(hasTransitions
+            ? [
+                {
+                  index: edge.index,
+                  points: [points[2], points[3], targetEnd],
+                },
+              ]
+            : []),
+        ];
+      },
+      );
       faces
         .sort((a, b) => {
           const depth = (face: { points: Point3[] }) =>
@@ -980,7 +1040,7 @@ export default function Home() {
           );
         });
 
-      if (showTopology && roofKind === "gable") {
+      if (showTopology && roofKind !== "shed") {
         context.strokeStyle = "#63371f";
         context.lineWidth = 1.5;
         const start = project(ridgeA);
@@ -1009,8 +1069,8 @@ export default function Home() {
         });
         context.stroke();
         const middle = {
-          x: (projectedProfile[0].x + projectedProfile[1].x) / 2,
-          y: (projectedProfile[0].y + projectedProfile[1].y) / 2,
+          x: (projectedProfile[1].x + projectedProfile[2].x) / 2,
+          y: (projectedProfile[1].y + projectedProfile[2].y) / 2,
         };
         context.beginPath();
         context.arc(
@@ -1943,9 +2003,9 @@ export default function Home() {
               </div>
               <div className="detail-inspector-note">
                 This eave is independently positioned from the fixed roof base.
-                It stays horizontal end-to-end while neighboring eaves absorb
-                the corner transitions. The ridge stays fixed, so moving this
-                eave changes the adjacent roof plane.
+                Its middle run stays horizontal. End triangles follow the
+                unchanged side slopes down to fixed roof-base corners while
+                this roof plane changes slope.
               </div>
               <dl className="inspector-data">
                 <div>
