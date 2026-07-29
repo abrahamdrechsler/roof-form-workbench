@@ -933,27 +933,56 @@ export default function Home() {
             : roofBase + rise,
         z: roofCenter.z,
       };
-      const edgeProfiles = roofEdges.map((edge) => {
+      const edgeProfiles = roofEdges.map((edge, edgePosition) => {
         const length = segmentLength(edge.start, edge.end);
         const eaveElevation = edgeElevation(edge.index);
-        const signedTransitionRun =
-          (eaveElevation - roofBase) / nominalSlope;
-        const transitionRun = Math.max(
-          -length * 0.75,
-          Math.min(length * 0.45, signedTransitionRun),
-        );
-        const transitionFraction =
-          length > 0 ? transitionRun / length : 0;
         const pointAlongEdge = (amount: number) => ({
           x: edge.start.x + (edge.end.x - edge.start.x) * amount,
           z: edge.start.z + (edge.end.z - edge.start.z) * amount,
         });
-        const plateauStart = pointAlongEdge(transitionFraction);
-        const plateauEnd = pointAlongEdge(1 - transitionFraction);
-        return {
-          edge,
-          hasTransitions: Math.abs(transitionFraction) > 0.0001,
-          points: [
+        const elevationOffset = eaveElevation - roofBase;
+
+        if (elevationOffset < -0.0001) {
+          const points = [
+            {
+              x: edge.start.x,
+              y: eaveElevation,
+              z: edge.start.z,
+            },
+            {
+              x: edge.start.x,
+              y: eaveElevation,
+              z: edge.start.z,
+            },
+            {
+              x: edge.end.x,
+              y: eaveElevation,
+              z: edge.end.z,
+            },
+            {
+              x: edge.end.x,
+              y: eaveElevation,
+              z: edge.end.z,
+            },
+          ];
+          return {
+            edge,
+            hasRaisedTransitions: false,
+            points,
+            ownedPoints: [points[1], points[2]],
+          };
+        }
+
+        if (elevationOffset > 0.0001) {
+          const transitionRun = Math.min(
+            length * 0.45,
+            elevationOffset / nominalSlope,
+          );
+          const transitionFraction =
+            length > 0 ? transitionRun / length : 0;
+          const plateauStart = pointAlongEdge(transitionFraction);
+          const plateauEnd = pointAlongEdge(1 - transitionFraction);
+          const points = [
             {
               x: edge.start.x,
               y: roofBase,
@@ -974,7 +1003,68 @@ export default function Home() {
               y: roofBase,
               z: edge.end.z,
             },
-          ],
+          ];
+          return {
+            edge,
+            hasRaisedTransitions: true,
+            points,
+            ownedPoints: [points[1], points[2]],
+          };
+        }
+
+        const previousEdge =
+          roofEdges[
+            (edgePosition + roofEdges.length - 1) % roofEdges.length
+          ];
+        const nextEdge =
+          roofEdges[(edgePosition + 1) % roofEdges.length];
+        const startElevation = Math.min(
+          roofBase,
+          edgeElevation(previousEdge.index),
+        );
+        const endElevation = Math.min(
+          roofBase,
+          edgeElevation(nextEdge.index),
+        );
+        const startRun = Math.min(
+          length * 0.45,
+          (roofBase - startElevation) / nominalSlope,
+        );
+        const endRun = Math.min(
+          length * 0.45,
+          (roofBase - endElevation) / nominalSlope,
+        );
+        const startBend = pointAlongEdge(length > 0 ? startRun / length : 0);
+        const endBend = pointAlongEdge(
+          length > 0 ? 1 - endRun / length : 1,
+        );
+        const points = [
+          {
+            x: edge.start.x,
+            y: startElevation,
+            z: edge.start.z,
+          },
+          {
+            x: startBend.x,
+            y: roofBase,
+            z: startBend.z,
+          },
+          {
+            x: endBend.x,
+            y: roofBase,
+            z: endBend.z,
+          },
+          {
+            x: edge.end.x,
+            y: endElevation,
+            z: edge.end.z,
+          },
+        ];
+        return {
+          edge,
+          hasRaisedTransitions: false,
+          points,
+          ownedPoints: points,
         };
       });
       if (selection?.kind === "roof-edge") {
@@ -1008,7 +1098,7 @@ export default function Home() {
             ? ridgeA
             : ridgeB;
       const faceDefinitions = edgeProfiles.map(
-        ({ edge, points, hasTransitions }) => {
+        ({ edge, points, hasRaisedTransitions, ownedPoints }) => {
         const edgeMidpoint = midpoint(edge.start, edge.end);
         const runsAlongRidge = dominantX
           ? Math.abs(edge.end.x - edge.start.x) >=
@@ -1041,7 +1131,8 @@ export default function Home() {
         return {
           edge,
           points,
-          hasTransitions,
+          hasRaisedTransitions,
+          ownedPoints,
           mainTargets,
         };
         },
@@ -1068,13 +1159,12 @@ export default function Home() {
           outerBoundary.push(point);
         };
 
-        if (previous.hasTransitions) {
+        if (previous.hasRaisedTransitions) {
           appendPoint(previous.points[2]);
           appendPoint(previous.points[3]);
         }
-        appendPoint(definition.points[1]);
-        appendPoint(definition.points[2]);
-        if (next.hasTransitions) {
+        definition.ownedPoints.forEach(appendPoint);
+        if (next.hasRaisedTransitions) {
           appendPoint(next.points[0]);
           appendPoint(next.points[1]);
         }
@@ -2201,8 +2291,9 @@ export default function Home() {
                 This eave is independently positioned from the fixed roof base.
                 Its middle run stays horizontal while the two neighboring roof
                 faces extend to its ends. The roof remains four faces; only this
-                face changes slope. Lowered eaves continue beyond the original
-                corners instead of folding inward.
+                face changes slope. Lowered eaves keep the authored rectangular
+                footprint while the neighboring side eaves bend down to their
+                shared corners.
               </div>
               <dl className="inspector-data">
                 <div>
