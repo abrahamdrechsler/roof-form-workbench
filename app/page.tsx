@@ -950,7 +950,7 @@ export default function Home() {
               Math.abs(point.z - ridgeB.z)
             ? ridgeA
             : ridgeB;
-      const faces = edgeProfiles.flatMap(
+      const faceDefinitions = edgeProfiles.map(
         ({ edge, points, hasTransitions }) => {
         const edgeMidpoint = midpoint(edge.start, edge.end);
         const runsAlongRidge = dominantX
@@ -981,30 +981,52 @@ export default function Home() {
           roofKind === "hip" && runsAlongRidge
             ? [targetEnd, targetStart]
             : [targetStart];
-        return [
-          ...(hasTransitions
-            ? [
-                {
-                  index: edge.index,
-                  points: [points[0], points[1], targetStart],
-                },
-              ]
-            : []),
-          {
-            index: edge.index,
-            points: [points[1], points[2], ...mainTargets],
-          },
-          ...(hasTransitions
-            ? [
-                {
-                  index: edge.index,
-                  points: [points[2], points[3], targetEnd],
-                },
-              ]
-            : []),
-        ];
-      },
+        return {
+          edge,
+          points,
+          hasTransitions,
+          mainTargets,
+        };
+        },
       );
+      const faces = faceDefinitions.map((definition, index) => {
+        const previous =
+          faceDefinitions[
+            (index + faceDefinitions.length - 1) %
+              faceDefinitions.length
+          ];
+        const next =
+          faceDefinitions[(index + 1) % faceDefinitions.length];
+        const outerBoundary: Point3[] = [];
+        const appendPoint = (point: Point3) => {
+          const previousPoint = outerBoundary[outerBoundary.length - 1];
+          if (
+            previousPoint &&
+            Math.abs(previousPoint.x - point.x) < 0.001 &&
+            Math.abs(previousPoint.y - point.y) < 0.001 &&
+            Math.abs(previousPoint.z - point.z) < 0.001
+          ) {
+            return;
+          }
+          outerBoundary.push(point);
+        };
+
+        if (previous.hasTransitions) {
+          appendPoint(previous.points[2]);
+          appendPoint(previous.points[3]);
+        }
+        appendPoint(definition.points[1]);
+        appendPoint(definition.points[2]);
+        if (next.hasTransitions) {
+          appendPoint(next.points[0]);
+          appendPoint(next.points[1]);
+        }
+
+        return {
+          index: definition.edge.index,
+          points: [...outerBoundary, ...definition.mainTargets],
+        };
+      });
       faces
         .sort((a, b) => {
           const depth = (face: { points: Point3[] }) =>
@@ -2003,9 +2025,9 @@ export default function Home() {
               </div>
               <div className="detail-inspector-note">
                 This eave is independently positioned from the fixed roof base.
-                Its middle run stays horizontal. End triangles follow the
-                unchanged side slopes down to fixed roof-base corners while
-                this roof plane changes slope.
+                Its middle run stays horizontal while the two neighboring roof
+                faces extend to its ends. The roof remains four faces; only this
+                face changes slope.
               </div>
               <dl className="inspector-data">
                 <div>
