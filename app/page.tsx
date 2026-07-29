@@ -936,9 +936,11 @@ export default function Home() {
       const edgeProfiles = roofEdges.map((edge) => {
         const length = segmentLength(edge.start, edge.end);
         const eaveElevation = edgeElevation(edge.index);
-        const transitionRun = Math.min(
-          length * 0.45,
-          Math.abs(eaveElevation - roofBase) / nominalSlope,
+        const signedTransitionRun =
+          (eaveElevation - roofBase) / nominalSlope;
+        const transitionRun = Math.max(
+          -length * 0.75,
+          Math.min(length * 0.45, signedTransitionRun),
         );
         const transitionFraction =
           length > 0 ? transitionRun / length : 0;
@@ -950,7 +952,7 @@ export default function Home() {
         const plateauEnd = pointAlongEdge(1 - transitionFraction);
         return {
           edge,
-          hasTransitions: transitionFraction > 0.0001,
+          hasTransitions: Math.abs(transitionFraction) > 0.0001,
           points: [
             {
               x: edge.start.x,
@@ -2199,7 +2201,8 @@ export default function Home() {
                 This eave is independently positioned from the fixed roof base.
                 Its middle run stays horizontal while the two neighboring roof
                 faces extend to its ends. The roof remains four faces; only this
-                face changes slope.
+                face changes slope. Lowered eaves continue beyond the original
+                corners instead of folding inward.
               </div>
               <dl className="inspector-data">
                 <div>
