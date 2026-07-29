@@ -243,6 +243,8 @@ export default function Home() {
   const [showDatums, setShowDatums] = useState(true);
   const [wallHandlePosition, setWallHandlePosition] =
     useState<ScreenPoint | null>(null);
+  const [eaveHandlePosition, setEaveHandlePosition] =
+    useState<ScreenPoint | null>(null);
   const [eaveCatalog, setEaveCatalog] = useState<EaveCondition[]>(
     INITIAL_EAVE_CONDITIONS,
   );
@@ -288,6 +290,11 @@ export default function Home() {
     pointerId: number;
     startY: number;
     startHeight: number;
+  } | null>(null);
+  const eaveHeightDrag = useRef<{
+    pointerId: number;
+    startY: number;
+    startElevation: number;
   } | null>(null);
   const didOrbit = useRef(false);
 
@@ -852,6 +859,9 @@ export default function Home() {
     } else {
       setWallHandlePosition((current) => (current ? null : current));
     }
+    if (selection?.kind !== "roof-edge") {
+      setEaveHandlePosition((current) => (current ? null : current));
+    }
 
     formEaveRegions.current = [];
     formRoofRegions.current = [];
@@ -940,6 +950,26 @@ export default function Home() {
           ],
         };
       });
+      if (selection?.kind === "roof-edge") {
+        const selectedProfile = edgeProfiles.find(
+          ({ edge }) => edge.index === selection.index,
+        );
+        if (selectedProfile) {
+          const { points } = selectedProfile;
+          const projected = project({
+            x: (points[1].x + points[2].x) / 2,
+            y: (points[1].y + points[2].y) / 2,
+            z: (points[1].z + points[2].z) / 2,
+          });
+          setEaveHandlePosition((current) =>
+            current &&
+            Math.abs(current.x - projected.x) < 0.25 &&
+            Math.abs(current.y - projected.y) < 0.25
+              ? current
+              : projected,
+          );
+        }
+      }
       const nearestRidgeEnd = (point: Point2) =>
         dominantX
           ? Math.abs(point.x - ridgeA.x) <=
@@ -1189,6 +1219,7 @@ export default function Home() {
         );
       }
     } else {
+      setEaveHandlePosition((current) => (current ? null : current));
       context.fillStyle = "#a95829";
       context.font = "700 10px monospace";
       context.fillText("CLOSE THE ROOF BOUNDARY TO GENERATE VOLUME", 16, 26);
@@ -1793,6 +1824,59 @@ export default function Home() {
                   <output>
                     {feetInches(wallHeights[selection.index] ?? 9)}
                   </output>
+                </button>
+              )}
+              {selection?.kind === "roof-edge" && eaveHandlePosition && (
+                <button
+                  className="wall-height-handle"
+                  style={{
+                    left: eaveHandlePosition.x,
+                    top: eaveHandlePosition.y,
+                  }}
+                  aria-label={`Drag to change roof edge ${selection.index + 1} eave height`}
+                  onPointerDown={(event) => {
+                    if (event.button !== 0) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                    eaveHeightDrag.current = {
+                      pointerId: event.pointerId,
+                      startY: event.clientY,
+                      startElevation: edgeElevation(selection.index),
+                    };
+                  }}
+                  onPointerMove={(event) => {
+                    const drag = eaveHeightDrag.current;
+                    if (!drag || drag.pointerId !== event.pointerId) return;
+                    const nextElevation =
+                      Math.round(
+                        Math.max(
+                          0,
+                          Math.min(
+                            40,
+                            drag.startElevation +
+                              (drag.startY - event.clientY) / 9,
+                          ),
+                        ) * 4,
+                      ) / 4;
+                    updateRelationship(selection.index, {
+                      elevationOffset: nextElevation - roofBase,
+                    });
+                  }}
+                  onPointerUp={(event) => {
+                    if (eaveHeightDrag.current?.pointerId !== event.pointerId)
+                      return;
+                    event.currentTarget.releasePointerCapture(event.pointerId);
+                    eaveHeightDrag.current = null;
+                  }}
+                  onPointerCancel={() => {
+                    eaveHeightDrag.current = null;
+                  }}
+                >
+                  <span className="wall-height-arrows" aria-hidden="true">
+                    ↑<i />↓
+                  </span>
+                  <output>{feetInches(edgeElevation(selection.index))}</output>
                 </button>
               )}
             </ViewPanel>
