@@ -239,6 +239,11 @@ export default function Home() {
   const [wallHeightDraft, setWallHeightDraft] = useState("9.00");
   const [orbit, setOrbit] = useState({ yaw: -42, pitch: 24 });
   const [formZoom, setFormZoom] = useState(1);
+  const [formFocusOffset, setFormFocusOffset] = useState<Point3>({
+    x: 0,
+    y: 0,
+    z: 0,
+  });
   const [showWalls, setShowWalls] = useState(true);
   const [showTopology, setShowTopology] = useState(true);
   const [showDatums, setShowDatums] = useState(true);
@@ -272,6 +277,7 @@ export default function Home() {
 
   const planRef = useRef<HTMLCanvasElement>(null);
   const formRef = useRef<HTMLCanvasElement>(null);
+  const formScaleRef = useRef(1);
   const planScaleRef = useRef({ scale: 10, centerX: 0, centerY: 0 });
   const formWallRegions = useRef<
     { index: number; points: ScreenPoint[] }[]
@@ -286,6 +292,17 @@ export default function Home() {
     y: number;
     yaw: number;
     pitch: number;
+  } | null>(null);
+  const panDrag = useRef<{
+    pointerId: number;
+    x: number;
+    y: number;
+    focusX: number;
+    focusY: number;
+    focusZ: number;
+    yaw: number;
+    pitch: number;
+    scale: number;
   } | null>(null);
   const wallHeightDrag = useRef<{
     pointerId: number;
@@ -384,6 +401,7 @@ export default function Home() {
     setPointerWorld(null);
     setOrbit({ yaw: -42, pitch: 24 });
     setFormZoom(1);
+    setFormFocusOffset({ x: 0, y: 0, z: 0 });
   };
 
   const updateWallHeight = (index: number, value: number) => {
@@ -666,11 +684,12 @@ export default function Home() {
     const scale =
       Math.min(width / (spread * 2.5), height / (maxHeight * 2.4)) *
       formZoom;
+    formScaleRef.current = scale;
     const origin = { x: width * 0.5, y: height * 0.59 };
     const pivotY = maxHeight * 0.38;
     const project = (point: Point3): ScreenPoint => {
-      const localX = point.x - center.x;
-      const localZ = point.z - center.z;
+      const localX = point.x - (center.x + formFocusOffset.x);
+      const localZ = point.z - (center.z + formFocusOffset.z);
       const horizontal = localX * Math.cos(yaw) - localZ * Math.sin(yaw);
       const depth = localX * Math.sin(yaw) + localZ * Math.cos(yaw);
       return {
@@ -678,7 +697,9 @@ export default function Home() {
         y:
           origin.y +
           depth * scale * Math.sin(cameraPitch) -
-          (point.y - pivotY) * scale * Math.cos(cameraPitch),
+          (point.y - (pivotY + formFocusOffset.y)) *
+            scale *
+            Math.cos(cameraPitch),
       };
     };
 
@@ -1233,6 +1254,7 @@ export default function Home() {
     center.z,
     clipWalls,
     edgeElevation,
+    formFocusOffset,
     formZoom,
     orbit,
     pitch,
@@ -1729,11 +1751,26 @@ export default function Home() {
                   setSelection(null);
                 }}
                 onPointerDown={(event) => {
-                  if (event.button !== 0) return;
+                  if (event.button !== 0 && event.button !== 2) return;
                   event.preventDefault();
                   event.currentTarget.setPointerCapture(event.pointerId);
-                  event.currentTarget.style.cursor = "grabbing";
                   didOrbit.current = false;
+                  if (event.button === 2) {
+                    event.currentTarget.style.cursor = "move";
+                    panDrag.current = {
+                      pointerId: event.pointerId,
+                      x: event.clientX,
+                      y: event.clientY,
+                      focusX: formFocusOffset.x,
+                      focusY: formFocusOffset.y,
+                      focusZ: formFocusOffset.z,
+                      yaw: (orbit.yaw * Math.PI) / 180,
+                      pitch: (orbit.pitch * Math.PI) / 180,
+                      scale: formScaleRef.current,
+                    };
+                    return;
+                  }
+                  event.currentTarget.style.cursor = "grabbing";
                   orbitDrag.current = {
                     pointerId: event.pointerId,
                     x: event.clientX,
@@ -1743,6 +1780,38 @@ export default function Home() {
                   };
                 }}
                 onPointerMove={(event) => {
+                  const pan = panDrag.current;
+                  if (pan && pan.pointerId === event.pointerId) {
+                    if (
+                      Math.abs(event.clientX - pan.x) +
+                        Math.abs(event.clientY - pan.y) >
+                      3
+                    ) {
+                      didOrbit.current = true;
+                    }
+                    const deltaX = event.clientX - pan.x;
+                    const deltaY = event.clientY - pan.y;
+                    const horizontal = -deltaX / pan.scale;
+                    const vertical = -deltaY / pan.scale;
+                    setFormFocusOffset({
+                      x:
+                        pan.focusX +
+                        horizontal * Math.cos(pan.yaw) +
+                        vertical *
+                          Math.sin(pan.yaw) *
+                          Math.sin(pan.pitch),
+                      y:
+                        pan.focusY -
+                        vertical * Math.cos(pan.pitch),
+                      z:
+                        pan.focusZ -
+                        horizontal * Math.sin(pan.yaw) +
+                        vertical *
+                          Math.cos(pan.yaw) *
+                          Math.sin(pan.pitch),
+                    });
+                    return;
+                  }
                   const drag = orbitDrag.current;
                   if (!drag || drag.pointerId !== event.pointerId) return;
                   if (
@@ -1764,15 +1833,22 @@ export default function Home() {
                   });
                 }}
                 onPointerUp={(event) => {
-                  if (orbitDrag.current?.pointerId !== event.pointerId) return;
+                  const endedOrbit =
+                    orbitDrag.current?.pointerId === event.pointerId;
+                  const endedPan =
+                    panDrag.current?.pointerId === event.pointerId;
+                  if (!endedOrbit && !endedPan) return;
                   event.currentTarget.releasePointerCapture(event.pointerId);
                   event.currentTarget.style.cursor = "grab";
-                  orbitDrag.current = null;
+                  if (endedOrbit) orbitDrag.current = null;
+                  if (endedPan) panDrag.current = null;
                 }}
                 onPointerCancel={(event) => {
                   event.currentTarget.style.cursor = "grab";
                   orbitDrag.current = null;
+                  panDrag.current = null;
                 }}
+                onContextMenu={(event) => event.preventDefault()}
                 onWheel={(event) => {
                   event.preventDefault();
                   const zoomFactor = Math.exp(-event.deltaY * 0.0015);
@@ -1782,7 +1858,7 @@ export default function Home() {
                 }}
               />
               <div className="canvas-note orbit-note">
-                Left-drag to orbit · Scroll to zoom
+                Left-drag orbit · Right-drag pan · Scroll zoom
               </div>
               <div className="orientation">
                 {Math.round(((orbit.yaw % 360) + 360) % 360)}°
