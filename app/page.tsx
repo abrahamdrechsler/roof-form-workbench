@@ -238,6 +238,7 @@ export default function Home() {
   const [pointerWorld, setPointerWorld] = useState<Point2 | null>(null);
   const [wallHeightDraft, setWallHeightDraft] = useState("9.00");
   const [orbit, setOrbit] = useState({ yaw: -42, pitch: 24 });
+  const [formZoom, setFormZoom] = useState(1);
   const [showWalls, setShowWalls] = useState(true);
   const [showTopology, setShowTopology] = useState(true);
   const [showDatums, setShowDatums] = useState(true);
@@ -382,6 +383,7 @@ export default function Home() {
     setCommand("select");
     setPointerWorld(null);
     setOrbit({ yaw: -42, pitch: 24 });
+    setFormZoom(1);
   };
 
   const updateWallHeight = (index: number, value: number) => {
@@ -661,7 +663,9 @@ export default function Home() {
         Math.hypot(point.x - center.x, point.z - center.z),
       ),
     );
-    const scale = Math.min(width / (spread * 2.5), height / (maxHeight * 2.4));
+    const scale =
+      Math.min(width / (spread * 2.5), height / (maxHeight * 2.4)) *
+      formZoom;
     const origin = { x: width * 0.5, y: height * 0.59 };
     const pivotY = maxHeight * 0.38;
     const project = (point: Point3): ScreenPoint => {
@@ -1229,6 +1233,7 @@ export default function Home() {
     center.z,
     clipWalls,
     edgeElevation,
+    formZoom,
     orbit,
     pitch,
     roofBase,
@@ -1768,9 +1773,16 @@ export default function Home() {
                   event.currentTarget.style.cursor = "grab";
                   orbitDrag.current = null;
                 }}
+                onWheel={(event) => {
+                  event.preventDefault();
+                  const zoomFactor = Math.exp(-event.deltaY * 0.0015);
+                  setFormZoom((current) =>
+                    Math.max(0.45, Math.min(3.5, current * zoomFactor)),
+                  );
+                }}
               />
               <div className="canvas-note orbit-note">
-                Left-click + drag to orbit
+                Left-drag to orbit · Scroll to zoom
               </div>
               <div className="orientation">
                 {Math.round(((orbit.yaw % 360) + 360) % 360)}°
