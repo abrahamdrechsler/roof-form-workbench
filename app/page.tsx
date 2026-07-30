@@ -673,7 +673,6 @@ export default function Home() {
     const { context, width, height } = ready;
     const yaw = (orbit.yaw * Math.PI) / 180;
     const cameraPitch = (orbit.pitch * Math.PI) / 180;
-    const maxHeight = Math.max(roofBase, ...wallHeights, 10) + 8;
     const allPoints = [...wallPoints, ...roofPoints];
     const spread = Math.max(
       34,
@@ -681,12 +680,16 @@ export default function Home() {
         Math.hypot(point.x - center.x, point.z - center.z),
       ),
     );
+    const cameraFrameHeight = Math.max(18, spread * 0.5);
     const scale =
-      Math.min(width / (spread * 2.5), height / (maxHeight * 2.4)) *
+      Math.min(
+        width / (spread * 2.5),
+        height / (cameraFrameHeight * 2.4),
+      ) *
       formZoom;
     formScaleRef.current = scale;
     const origin = { x: width * 0.5, y: height * 0.59 };
-    const pivotY = maxHeight * 0.38;
+    const pivotY = cameraFrameHeight * 0.38;
     const project = (point: Point3): ScreenPoint => {
       const localX = point.x - (center.x + formFocusOffset.x);
       const localZ = point.z - (center.z + formFocusOffset.z);
