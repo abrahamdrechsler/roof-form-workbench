@@ -149,7 +149,13 @@ function line(
   context.stroke();
 }
 
-function EaveSection({ draft }: { draft: EaveDetailDraft }) {
+export function EaveDetailPreview({
+  draft,
+  className = "",
+}: {
+  draft: EaveDetailDraft;
+  className?: string;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const draw = useCallback(() => {
@@ -273,7 +279,7 @@ function EaveSection({ draft }: { draft: EaveDetailDraft }) {
     return () => observer.disconnect();
   }, [draw]);
 
-  return <canvas className="eave-editor-canvas" ref={canvasRef} role="img" aria-label={`${SYSTEM_LABELS[draft.systemType]} eave section`} />;
+  return <canvas className={`eave-editor-canvas ${className}`} ref={canvasRef} role="img" aria-label={`${SYSTEM_LABELS[draft.systemType]} eave section`} />;
 }
 
 export function EaveDetailEditor({ draft, onChange, onCancel, onSave, saveLabel }: EaveDetailEditorProps) {
@@ -309,7 +315,7 @@ export function EaveDetailEditor({ draft, onChange, onCancel, onSave, saveLabel 
               <div><span>STRUCTURAL TYPE</span><h2>{SYSTEM_LABELS[draft.systemType]}</h2></div>
               <p>Define a reusable 2D bearing and fascia condition. Saved details become available only to roofs with this structural system.</p>
             </div>
-            <EaveSection draft={{ ...draft, parameters }} />
+            <EaveDetailPreview draft={{ ...draft, parameters }} />
             <div className="eave-editor-results">
               <div><span>Roof system</span><strong>{SYSTEM_LABELS[draft.systemType]}</strong></div>
               <div><span>Fascia minimum</span><strong>{formatInches(fasciaMinimum)}</strong></div>

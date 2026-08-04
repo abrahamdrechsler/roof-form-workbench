@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   DEFAULT_EAVE_PARAMETERS,
   EaveDetailEditor,
+  EaveDetailPreview,
   SYSTEM_LABELS,
 } from "./EaveDetailEditor";
 import type {
@@ -1588,20 +1589,6 @@ export default function Home() {
     selection?.kind === "catalog"
       ? eaveCatalog.find((condition) => condition.id === selection.id)
       : null;
-  const previewInset =
-    catalogDraft.systemType === "rafter"
-      ? catalogDraft.parameters.seatCut / 12
-      : 0;
-  const previewHeight =
-    catalogDraft.systemType === "raisedHeelTruss"
-      ? catalogDraft.parameters.heelHeight / 12
-      : (catalogDraft.systemType === "rafter"
-          ? catalogDraft.parameters.rafterDepth
-          : catalogDraft.parameters.topChordDepth) / 12;
-  const previewWallFaceX = 150;
-  const previewPlateY = 140;
-  const previewLocatorX = previewWallFaceX - previewInset * 20;
-  const previewLocatorY = previewPlateY + previewHeight * 9;
 
   return (
     <main className="studio-shell">
@@ -2379,58 +2366,19 @@ export default function Home() {
           ) : selectedCatalog ? (
             <>
               <InspectorHeader
-                label="RAFTER DETAIL CATALOG"
-                title="Edit wall / roof condition"
+                label="EAVE DETAIL CATALOG"
+                title={selectedCatalog.name}
                 onClose={() => setSelection(null)}
               />
-              <div className="detail-preview">
-                <span className="preview-ground" />
-                <span className="preview-wall" />
-                <span className="preview-plate" />
-                <span
-                  className="preview-roof"
-                  style={{
-                    left: previewLocatorX - 55,
-                    bottom: previewLocatorY - 4.5,
+              <div className="detail-preview shared-eave-preview">
+                <EaveDetailPreview
+                  className="inspector-eave-canvas"
+                  draft={{
+                    name: catalogDraft.name,
+                    systemType: catalogDraft.systemType,
+                    parameters: catalogDraft.parameters,
                   }}
                 />
-                <span
-                  className="preview-locator"
-                  style={{
-                    left: previewLocatorX - 5.5,
-                    bottom: previewLocatorY - 5.5,
-                  }}
-                />
-                <span
-                  className="preview-x-dimension"
-                  style={{
-                    left: Math.min(previewWallFaceX, previewLocatorX),
-                    width: Math.max(
-                      1,
-                      Math.abs(previewWallFaceX - previewLocatorX),
-                    ),
-                    bottom: previewPlateY - 23,
-                  }}
-                />
-                <span
-                  className="preview-y-dimension"
-                  style={{
-                    left: previewWallFaceX + 20,
-                    bottom: previewPlateY,
-                    height: Math.max(1, previewLocatorY - previewPlateY),
-                  }}
-                />
-                <span className="preview-label plate">T.O. PLATE</span>
-                <span className="preview-label roof">ROOF PLANE</span>
-                <span
-                  className="preview-label driver"
-                  style={{
-                    left: previewLocatorX - 30,
-                    bottom: previewLocatorY + 15,
-                  }}
-                >
-                  {catalogDraft.systemType === "rafter" ? "SEAT CUT" : "HEEL DATUM"}
-                </span>
               </div>
               <p className="detail-preview-caption">
                 This detail remains edge metadata. It does not reposition the
