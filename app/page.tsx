@@ -1,6 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  DEFAULT_EAVE_PARAMETERS,
+  EaveDetailEditor,
+  SYSTEM_LABELS,
+} from "./EaveDetailEditor";
+import type {
+  EaveDetailDraft,
+  EaveParameters,
+  RoofSystemType,
+} from "./EaveDetailEditor";
 
 type RoofKind = "gable" | "hip" | "shed";
 type ViewMode = "split" | "plan" | "form";
@@ -12,6 +22,8 @@ type ScreenPoint = { x: number; y: number };
 type EaveCondition = {
   id: string;
   name: string;
+  systemType: RoofSystemType;
+  parameters: EaveParameters;
   driver: EaveDriver;
   height: number;
   inset: number;
@@ -45,17 +57,39 @@ const INITIAL_ROOF_POINTS: Point2[] = [
 const INITIAL_EAVE_CONDITIONS: EaveCondition[] = [
   {
     id: "rafter-seat",
-    name: "Rafter · compact",
+    name: "Rafter · standard birdsmouth",
+    systemType: "rafter",
+    parameters: { ...DEFAULT_EAVE_PARAMETERS },
     driver: "seat",
-    height: 0.75,
-    inset: 0.25,
+    height: DEFAULT_EAVE_PARAMETERS.rafterDepth / 12,
+    inset: DEFAULT_EAVE_PARAMETERS.seatCut / 12,
   },
   {
     id: "raised-heel",
     name: "Raised heel · standard",
+    systemType: "raisedHeelTruss",
+    parameters: { ...DEFAULT_EAVE_PARAMETERS },
     driver: "heel",
-    height: 1.5,
-    inset: 0.5,
+    height: DEFAULT_EAVE_PARAMETERS.heelHeight / 12,
+    inset: 0,
+  },
+  {
+    id: "cantilevered-raised-heel",
+    name: "Cantilevered raised heel · standard",
+    systemType: "cantileveredRaisedHeelTruss",
+    parameters: { ...DEFAULT_EAVE_PARAMETERS, overhang: 14 },
+    driver: "heel",
+    height: DEFAULT_EAVE_PARAMETERS.heelHeight / 12,
+    inset: 0,
+  },
+  {
+    id: "common-truss",
+    name: "Common truss · standard",
+    systemType: "commonTruss",
+    parameters: { ...DEFAULT_EAVE_PARAMETERS },
+    driver: "heel",
+    height: DEFAULT_EAVE_PARAMETERS.topChordDepth / 12,
+    inset: 0,
   },
 ];
 
@@ -234,6 +268,7 @@ export default function Home() {
   const [clipWalls, setClipWalls] = useState(false);
   const [pitch, setPitch] = useState(6);
   const [roofKind, setRoofKind] = useState<RoofKind>("hip");
+  const [roofSystemType, setRoofSystemType] = useState<RoofSystemType>("rafter");
   const [selection, setSelection] = useState<Selection>(null);
   const [pointerWorld, setPointerWorld] = useState<Point2 | null>(null);
   const [wallHeightDraft, setWallHeightDraft] = useState("9.00");
@@ -263,17 +298,13 @@ export default function Home() {
   );
   const [catalogDraft, setCatalogDraft] = useState({
     name: "",
-    driver: "heel" as EaveDriver,
-    height: 0,
-    inset: 0,
+    systemType: "rafter" as RoofSystemType,
+    parameters: { ...DEFAULT_EAVE_PARAMETERS },
   });
-  const [showCatalogCreator, setShowCatalogCreator] = useState(false);
-  const [newCatalogDraft, setNewCatalogDraft] = useState({
-    name: "New eave condition",
-    driver: "heel" as EaveDriver,
-    height: 1.5,
-    inset: 0.5,
-  });
+  const [detailEditor, setDetailEditor] = useState<{
+    id: string | null;
+    draft: EaveDetailDraft;
+  } | null>(null);
 
   const planRef = useRef<HTMLCanvasElement>(null);
   const formRef = useRef<HTMLCanvasElement>(null);
@@ -319,13 +350,18 @@ export default function Home() {
   const walls = wallSegments(wallPoints, wallsClosed);
   const roofEdges = roofSegments(roofPoints, roofClosed);
   const center = modelCenter(wallPoints, roofPoints);
+  const compatibleEaveDetails = eaveCatalog.filter(
+    (condition) => condition.systemType === roofSystemType,
+  );
 
   const conditionForEdge = useCallback(
     (index: number) =>
       eaveCatalog.find(
-        (condition) => condition.id === relationships[index]?.conditionId,
-      ) ?? eaveCatalog[0],
-    [eaveCatalog, relationships],
+        (condition) =>
+          condition.id === relationships[index]?.conditionId &&
+          condition.systemType === roofSystemType,
+      ) ?? eaveCatalog.find((condition) => condition.systemType === roofSystemType),
+    [eaveCatalog, relationships, roofSystemType],
   );
 
   const edgeElevation = useCallback(
@@ -368,8 +404,9 @@ export default function Home() {
 
   const closeRoof = () => {
     if (roofPoints.length < 3) return;
+    const fallbackId = compatibleEaveDetails[0]?.id ?? "";
     const nextRelationships = roofPoints.map(() => ({
-      conditionId: eaveCatalog[0]?.id ?? "",
+      conditionId: fallbackId,
       overhang: 1.5,
       elevationOffset: 0,
     }));
@@ -389,6 +426,7 @@ export default function Home() {
     setClipWalls(false);
     setPitch(6);
     setRoofKind("hip");
+    setRoofSystemType("rafter");
     setRelationships(
       INITIAL_ROOF_POINTS.map(() => ({
         conditionId: "rafter-seat",
@@ -427,50 +465,120 @@ export default function Home() {
     );
   };
 
+  const changeRoofSystem = (systemType: RoofSystemType) => {
+    const fallback = eaveCatalog.find(
+      (condition) => condition.systemType === systemType,
+    );
+    if (fallback === undefined) {
+      return;
+    }
+    setRoofSystemType(systemType);
+    setRelationships((current) =>
+      current.map((relationship) => {
+        const currentDetail = eaveCatalog.find(
+          (condition) => condition.id === relationship.conditionId,
+        );
+        return currentDetail?.systemType === systemType
+          ? relationship
+          : { ...relationship, conditionId: fallback.id };
+      }),
+    );
+  };
+
   const openCatalog = (condition: EaveCondition) => {
     setSelection({ kind: "catalog", id: condition.id });
     setCatalogDraft({
       name: condition.name,
-      driver: condition.driver,
-      height: condition.height,
-      inset: condition.inset,
+      systemType: condition.systemType,
+      parameters: { ...condition.parameters },
     });
   };
 
-  const saveNewCondition = () => {
-    const condition: EaveCondition = {
-      id: `eave-${Date.now()}`,
-      name: newCatalogDraft.name.trim() || "Untitled eave",
-      driver: newCatalogDraft.driver,
-      height: Math.max(0, Math.min(6, newCatalogDraft.height)),
-      inset: Math.max(-2, Math.min(4, newCatalogDraft.inset)),
-    };
-    setEaveCatalog((current) => [...current, condition]);
-    setShowCatalogCreator(false);
-    openCatalog(condition);
+  const openNewDetail = () => {
+    setDetailEditor({
+      id: null,
+      draft: {
+        name: `New ${SYSTEM_LABELS[roofSystemType].toLowerCase()} detail`,
+        systemType: roofSystemType,
+        parameters: { ...DEFAULT_EAVE_PARAMETERS, pitch },
+      },
+    });
   };
 
-  const updateCatalog = () => {
-    if (selection?.kind !== "catalog") return;
-    setEaveCatalog((current) =>
-      current.map((condition) =>
-        condition.id === selection.id
-          ? {
-              ...condition,
-              name: catalogDraft.name.trim() || "Untitled eave",
-              driver: catalogDraft.driver,
-              height: Math.max(0, Math.min(6, catalogDraft.height)),
-              inset: Math.max(-2, Math.min(4, catalogDraft.inset)),
-            }
-          : condition,
-      ),
-    );
+  const openDetailEditor = (condition: EaveCondition) => {
+    setDetailEditor({
+      id: condition.id,
+      draft: {
+        name: condition.name,
+        systemType: condition.systemType,
+        parameters: { ...condition.parameters },
+      },
+    });
+  };
+
+  const saveDetailEditor = () => {
+    if (detailEditor === null) {
+      return;
+    }
+    const id = detailEditor.id ?? `eave-${Date.now()}`;
+    const parameters = detailEditor.draft.parameters;
+    const condition: EaveCondition = {
+      id,
+      name: detailEditor.draft.name.trim() || "Untitled eave detail",
+      systemType: detailEditor.draft.systemType,
+      parameters,
+      driver: detailEditor.draft.systemType === "rafter" ? "seat" : "heel",
+      height:
+        detailEditor.draft.systemType === "raisedHeelTruss"
+          ? parameters.heelHeight / 12
+          : (detailEditor.draft.systemType === "rafter"
+              ? parameters.rafterDepth
+              : parameters.topChordDepth) / 12,
+      inset:
+        detailEditor.draft.systemType === "rafter"
+          ? parameters.seatCut / 12
+          : 0,
+    };
+    setEaveCatalog((current) => {
+      if (detailEditor.id === null) {
+        return [...current, condition];
+      }
+      return current.map((item) => item.id === condition.id ? condition : item);
+    });
+    if (detailEditor.id !== null) {
+      setRelationships((current) =>
+        current.map((relationship) =>
+          relationship.conditionId === detailEditor.id &&
+          condition.systemType !== roofSystemType
+            ? {
+                ...relationship,
+                conditionId:
+                  eaveCatalog.find(
+                    (item) =>
+                      item.id !== detailEditor.id &&
+                      item.systemType === roofSystemType,
+                  )?.id ?? "",
+              }
+            : relationship,
+        ),
+      );
+    }
+    setSelection({ kind: "catalog", id });
+    setCatalogDraft({
+      name: condition.name,
+      systemType: condition.systemType,
+      parameters: { ...condition.parameters },
+    });
+    setDetailEditor(null);
   };
 
   const deleteCatalog = () => {
     if (selection?.kind !== "catalog" || eaveCatalog.length <= 1) return;
+    const selected = eaveCatalog.find((condition) => condition.id === selection.id);
     const fallback = eaveCatalog.find(
-      (condition) => condition.id !== selection.id,
+      (condition) =>
+        condition.id !== selection.id &&
+        condition.systemType === selected?.systemType,
     );
     if (!fallback) return;
     setRelationships((current) =>
@@ -1480,8 +1588,16 @@ export default function Home() {
     selection?.kind === "catalog"
       ? eaveCatalog.find((condition) => condition.id === selection.id)
       : null;
-  const previewInset = Math.max(-2, Math.min(4, catalogDraft.inset || 0));
-  const previewHeight = Math.max(0, Math.min(6, catalogDraft.height || 0));
+  const previewInset =
+    catalogDraft.systemType === "rafter"
+      ? catalogDraft.parameters.seatCut / 12
+      : 0;
+  const previewHeight =
+    catalogDraft.systemType === "raisedHeelTruss"
+      ? catalogDraft.parameters.heelHeight / 12
+      : (catalogDraft.systemType === "rafter"
+          ? catalogDraft.parameters.rafterDepth
+          : catalogDraft.parameters.topChordDepth) / 12;
   const previewWallFaceX = 150;
   const previewPlateY = 140;
   const previewLocatorX = previewWallFaceX - previewInset * 20;
@@ -1600,6 +1716,20 @@ export default function Home() {
                 </button>
               ))}
             </div>
+            <div className="roof-system-field">
+              <span>Structural system</span>
+              <div className="roof-system-options">
+                {(Object.keys(SYSTEM_LABELS) as RoofSystemType[]).map((systemType) => (
+                  <button
+                    key={systemType}
+                    className={roofSystemType === systemType ? "active" : ""}
+                    onClick={() => changeRoofSystem(systemType)}
+                  >
+                    {SYSTEM_LABELS[systemType]}
+                  </button>
+                ))}
+              </div>
+            </div>
             <Range
               label="Roof base elevation"
               value={roofBase}
@@ -1626,9 +1756,10 @@ export default function Home() {
           </div>
 
           <div className="control-section catalog-section">
-            <ControlHeading number="03" title="Rafter detail catalog" />
+            <ControlHeading number="03" title="Eave detail catalog" />
             <p className="catalog-copy">
-              Edge details are stored without moving the roof base datum.
+              Reusable details are typed by structural system. Edges can only
+              subscribe to details compatible with the active roof.
             </p>
             <div className="eave-catalog-list">
               {eaveCatalog.map((condition) => (
@@ -1646,84 +1777,16 @@ export default function Home() {
                   <span>
                     <strong>{condition.name}</strong>
                     <small>
-                      X {feetInches(condition.inset)} · Y +
-                      {feetInches(condition.height)}
+                      {SYSTEM_LABELS[condition.systemType]}
                     </small>
                   </span>
                   <span className="catalog-chevron">›</span>
                 </button>
               ))}
             </div>
-            {showCatalogCreator ? (
-              <div className="eave-creator">
-                <input
-                  value={newCatalogDraft.name}
-                  onChange={(event) =>
-                    setNewCatalogDraft((current) => ({
-                      ...current,
-                      name: event.target.value,
-                    }))
-                  }
-                />
-                <div className="eave-creator-row">
-                  <select
-                    value={newCatalogDraft.driver}
-                    onChange={(event) =>
-                      setNewCatalogDraft((current) => ({
-                        ...current,
-                        driver: event.target.value as EaveDriver,
-                      }))
-                    }
-                  >
-                    <option value="heel">Heel</option>
-                    <option value="seat">Seat</option>
-                  </select>
-                  <label>
-                    X
-                    <input
-                      type="number"
-                      step={0.25}
-                      value={newCatalogDraft.inset}
-                      onChange={(event) =>
-                        setNewCatalogDraft((current) => ({
-                          ...current,
-                          inset: Number(event.target.value),
-                        }))
-                      }
-                    />
-                  </label>
-                  <label>
-                    Y
-                    <input
-                      type="number"
-                      step={0.25}
-                      value={newCatalogDraft.height}
-                      onChange={(event) =>
-                        setNewCatalogDraft((current) => ({
-                          ...current,
-                          height: Number(event.target.value),
-                        }))
-                      }
-                    />
-                  </label>
-                </div>
-                <div className="eave-creator-actions">
-                  <button onClick={() => setShowCatalogCreator(false)}>
-                    Cancel
-                  </button>
-                  <button className="save-condition" onClick={saveNewCondition}>
-                    Save type
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <button
-                className="add-condition-button"
-                onClick={() => setShowCatalogCreator(true)}
-              >
-                + New condition
-              </button>
-            )}
+            <button className="add-condition-button" onClick={openNewDetail}>
+              + New eave detail
+            </button>
           </div>
 
           <div className="control-section layer-section">
@@ -2240,7 +2303,7 @@ export default function Home() {
                   }
                 />
                 <label>
-                  <span>Rafter detail</span>
+                  <span>{SYSTEM_LABELS[roofSystemType]} detail</span>
                   <select
                     value={relationships[selection.index]?.conditionId ?? ""}
                     onChange={(event) =>
@@ -2249,7 +2312,7 @@ export default function Home() {
                       })
                     }
                   >
-                    {eaveCatalog.map((condition) => (
+                    {compatibleEaveDetails.map((condition) => (
                       <option key={condition.id} value={condition.id}>
                         {condition.name}
                       </option>
@@ -2366,7 +2429,7 @@ export default function Home() {
                     bottom: previewLocatorY + 15,
                   }}
                 >
-                  {catalogDraft.driver === "heel" ? "HEEL DATUM" : "SEAT CUT"}
+                  {catalogDraft.systemType === "rafter" ? "SEAT CUT" : "HEEL DATUM"}
                 </span>
               </div>
               <p className="detail-preview-caption">
@@ -2387,18 +2450,19 @@ export default function Home() {
                   />
                 </label>
                 <label>
-                  <span>Structural driver</span>
+                  <span>Structural system</span>
                   <select
-                    value={catalogDraft.driver}
+                    value={catalogDraft.systemType}
                     onChange={(event) =>
                       setCatalogDraft((current) => ({
                         ...current,
-                        driver: event.target.value as EaveDriver,
+                        systemType: event.target.value as RoofSystemType,
                       }))
                     }
                   >
-                    <option value="heel">Heel height</option>
-                    <option value="seat">Seat cut</option>
+                    {(Object.keys(SYSTEM_LABELS) as RoofSystemType[]).map((systemType) => (
+                      <option key={systemType} value={systemType}>{SYSTEM_LABELS[systemType]}</option>
+                    ))}
                   </select>
                 </label>
                 <div className="detail-form-row">
@@ -2410,11 +2474,14 @@ export default function Home() {
                         min={-2}
                         max={4}
                         step={0.25}
-                        value={catalogDraft.inset}
+                        value={previewInset}
                         onChange={(event) =>
                           setCatalogDraft((current) => ({
                             ...current,
-                            inset: Number(event.target.value),
+                            parameters: {
+                              ...current.parameters,
+                              seatCut: Number(event.target.value) * 12,
+                            },
                           }))
                         }
                       />
@@ -2429,11 +2496,14 @@ export default function Home() {
                         min={0}
                         max={6}
                         step={0.25}
-                        value={catalogDraft.height}
+                        value={previewHeight}
                         onChange={(event) =>
                           setCatalogDraft((current) => ({
                             ...current,
-                            height: Number(event.target.value),
+                            parameters: {
+                              ...current.parameters,
+                              heelHeight: Number(event.target.value) * 12,
+                            },
                           }))
                         }
                       />
@@ -2445,13 +2515,21 @@ export default function Home() {
               <div className="detail-inspector-actions">
                 <button
                   className="delete-detail"
-                  disabled={eaveCatalog.length <= 1}
+                  disabled={eaveCatalog.filter((condition) => condition.systemType === selectedCatalog.systemType).length <= 1}
                   onClick={deleteCatalog}
                 >
                   Delete
                 </button>
-                <button className="save-detail" onClick={updateCatalog}>
-                  Save changes
+                <button
+                  className="save-detail"
+                  onClick={() => openDetailEditor({
+                    ...selectedCatalog,
+                    name: catalogDraft.name,
+                    systemType: catalogDraft.systemType,
+                    parameters: { ...catalogDraft.parameters },
+                  })}
+                >
+                  Edit in 2D detail lab
                 </button>
               </div>
             </>
@@ -2501,6 +2579,17 @@ export default function Home() {
           {clipWalls ? "on" : "off"}
         </span>
       </footer>
+      {detailEditor !== null ? (
+        <EaveDetailEditor
+          draft={detailEditor.draft}
+          onChange={(draft) =>
+            setDetailEditor((current) => current === null ? null : { ...current, draft })
+          }
+          onCancel={() => setDetailEditor(null)}
+          onSave={saveDetailEditor}
+          saveLabel={detailEditor.id === null ? "Add to catalog" : "Save detail"}
+        />
+      ) : null}
     </main>
   );
 }
