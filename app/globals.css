@@ -361,9 +361,46 @@ p {
   line-height: 1.35;
 }
 
+.catalog-copy strong {
+  color: var(--ink);
+}
+
+.catalog-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.catalog-heading-row .section-heading {
+  margin-bottom: 0;
+}
+
+.catalog-new-button {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  color: white;
+  background: var(--teal);
+  border: 1px solid var(--teal);
+  border-radius: 5px;
+  font-size: 9px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.catalog-new-button:hover {
+  filter: brightness(0.94);
+}
+
 .eave-catalog-list {
+  max-height: clamp(118px, 21vh, 190px);
+  min-height: 0;
+  overflow-y: auto;
   display: grid;
   gap: 5px;
+  padding-right: 3px;
+  scrollbar-color: #bdb5aa transparent;
+  scrollbar-width: thin;
 }
 
 .eave-catalog-item {
@@ -452,19 +489,6 @@ p {
   height: 5px;
   background: var(--teal);
   border-radius: 50%;
-}
-
-.add-condition-button {
-  width: 100%;
-  margin-top: 6px;
-  padding: 6px 8px;
-  color: var(--teal);
-  background: transparent;
-  border: 1px dashed #9dc3c1;
-  border-radius: 5px;
-  font-size: 9px;
-  font-weight: 700;
-  cursor: pointer;
 }
 
 .eave-creator {

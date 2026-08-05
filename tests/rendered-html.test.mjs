@@ -26,7 +26,8 @@ test("server-renders the Roof Form Workbench and its structural systems", async 
   assert.match(html, /Raised heel truss/);
   assert.match(html, /Cantilevered raised-heel truss/);
   assert.match(html, /Common truss/);
-  assert.match(html, /New eave detail/);
+  assert.match(html, /Create new eave detail/);
+  assert.match(html, /4(?:<!-- -->)? saved details/);
 });
 
 test("catalog details and edge assignments share a typed compatibility model", async () => {
@@ -41,6 +42,7 @@ test("catalog details and edge assignments share a typed compatibility model", a
   assert.match(page, /replacement\.parameters\.overhang - previous\.parameters\.overhang/);
   assert.doesNotMatch(page, /Independent overhang/);
   assert.match(page, /changeRoofSystem/);
+  assert.match(page, /catalog-new-button/);
   assert.match(page, /Edit in 2D detail lab/);
   assert.doesNotMatch(page, /previewInset|previewHeight/);
   assert.match(editor, /role="dialog"/);

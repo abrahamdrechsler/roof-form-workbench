@@ -1845,10 +1845,20 @@ export default function Home() {
           </div>
 
           <div className="control-section catalog-section">
-            <ControlHeading number="03" title="Eave detail catalog" />
+            <div className="catalog-heading-row">
+              <ControlHeading number="03" title="Eave detail catalog" />
+              <button
+                className="catalog-new-button"
+                onClick={openNewDetail}
+                aria-label="Create new eave detail"
+              >
+                <span aria-hidden="true">+</span> New
+              </button>
+            </div>
             <p className="catalog-copy">
-              Reusable details are typed by structural system. Edges can only
-              subscribe to details compatible with the active roof.
+              <strong>{eaveCatalog.length} saved details.</strong> Reusable
+              details are typed by structural system. Edges can only subscribe
+              to details compatible with the active roof.
             </p>
             <div className="eave-catalog-list">
               {eaveCatalog.map((condition) => (
@@ -1873,9 +1883,6 @@ export default function Home() {
                 </button>
               ))}
             </div>
-            <button className="add-condition-button" onClick={openNewDetail}>
-              + New eave detail
-            </button>
           </div>
 
           <div className="control-section layer-section">
