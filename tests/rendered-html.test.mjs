@@ -39,6 +39,7 @@ test("catalog details and edge assignments share a typed compatibility model", a
   assert.match(page, /compatibleEaveDetails\.map/);
   assert.match(page, /changeRoofSystem/);
   assert.match(page, /Edit in 2D detail lab/);
+  assert.doesNotMatch(page, /previewInset|previewHeight/);
   assert.match(editor, /role="dialog"/);
   assert.match(editor, /aria-modal="true"/);
   assert.match(editor, /DEFAULT_EAVE_PARAMETERS/);

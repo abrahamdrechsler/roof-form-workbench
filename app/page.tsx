@@ -2384,81 +2384,9 @@ export default function Home() {
                 This detail remains edge metadata. It does not reposition the
                 roof’s fixed base elevation.
               </p>
-              <div className="detail-form">
-                <label>
-                  <span>Detail name</span>
-                  <input
-                    value={catalogDraft.name}
-                    onChange={(event) =>
-                      setCatalogDraft((current) => ({
-                        ...current,
-                        name: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
-                <label>
-                  <span>Structural system</span>
-                  <select
-                    value={catalogDraft.systemType}
-                    onChange={(event) =>
-                      setCatalogDraft((current) => ({
-                        ...current,
-                        systemType: event.target.value as RoofSystemType,
-                      }))
-                    }
-                  >
-                    {(Object.keys(SYSTEM_LABELS) as RoofSystemType[]).map((systemType) => (
-                      <option key={systemType} value={systemType}>{SYSTEM_LABELS[systemType]}</option>
-                    ))}
-                  </select>
-                </label>
-                <div className="detail-form-row">
-                  <label>
-                    <span>X · inboard from wall face</span>
-                    <div>
-                      <input
-                        type="number"
-                        min={-2}
-                        max={4}
-                        step={0.25}
-                        value={previewInset}
-                        onChange={(event) =>
-                          setCatalogDraft((current) => ({
-                            ...current,
-                            parameters: {
-                              ...current.parameters,
-                              seatCut: Number(event.target.value) * 12,
-                            },
-                          }))
-                        }
-                      />
-                      <i>ft</i>
-                    </div>
-                  </label>
-                  <label>
-                    <span>Y · above top plate</span>
-                    <div>
-                      <input
-                        type="number"
-                        min={0}
-                        max={6}
-                        step={0.25}
-                        value={previewHeight}
-                        onChange={(event) =>
-                          setCatalogDraft((current) => ({
-                            ...current,
-                            parameters: {
-                              ...current.parameters,
-                              heelHeight: Number(event.target.value) * 12,
-                            },
-                          }))
-                        }
-                      />
-                      <i>ft</i>
-                    </div>
-                  </label>
-                </div>
+              <div className="catalog-detail-summary">
+                <span>Structural system</span>
+                <strong>{SYSTEM_LABELS[selectedCatalog.systemType]}</strong>
               </div>
               <div className="detail-inspector-actions">
                 <button
@@ -2470,12 +2398,7 @@ export default function Home() {
                 </button>
                 <button
                   className="save-detail"
-                  onClick={() => openDetailEditor({
-                    ...selectedCatalog,
-                    name: catalogDraft.name,
-                    systemType: catalogDraft.systemType,
-                    parameters: { ...catalogDraft.parameters },
-                  })}
+                  onClick={() => openDetailEditor(selectedCatalog)}
                 >
                   Edit in 2D detail lab
                 </button>
