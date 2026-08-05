@@ -37,6 +37,9 @@ test("catalog details and edge assignments share a typed compatibility model", a
 
   assert.match(page, /condition\.systemType === roofSystemType/);
   assert.match(page, /compatibleEaveDetails\.map/);
+  assert.match(page, /shiftRoofEdgesByOverhang/);
+  assert.match(page, /replacement\.parameters\.overhang - previous\.parameters\.overhang/);
+  assert.doesNotMatch(page, /Independent overhang/);
   assert.match(page, /changeRoofSystem/);
   assert.match(page, /Edit in 2D detail lab/);
   assert.doesNotMatch(page, /previewInset|previewHeight/);

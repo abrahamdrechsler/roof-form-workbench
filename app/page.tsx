@@ -31,7 +31,6 @@ type EaveCondition = {
 };
 type EdgeRelationship = {
   conditionId: string;
-  overhang: number;
   elevationOffset: number;
 };
 type Selection =
@@ -257,6 +256,47 @@ function modelCenter(walls: Point2[], roof: Point2[]) {
   };
 }
 
+function shiftRoofEdgesByOverhang(
+  points: Point2[],
+  changes: Array<{ edgeIndex: number; delta: number }>,
+): Point2[] {
+  if (points.length < 3 || changes.length === 0) {
+    return points;
+  }
+  const signedArea = points.reduce((area, point, index) => {
+    const next = points[(index + 1) % points.length];
+    return area + point.x * next.z - next.x * point.z;
+  }, 0);
+  const orientation = signedArea >= 0 ? 1 : -1;
+  const offsets = points.map(() => ({ x: 0, z: 0 }));
+
+  changes.forEach(({ edgeIndex, delta }) => {
+    const start = points[edgeIndex];
+    const endIndex = (edgeIndex + 1) % points.length;
+    const end = points[endIndex];
+    if (start === undefined || end === undefined) {
+      return;
+    }
+    const deltaX = end.x - start.x;
+    const deltaZ = end.z - start.z;
+    const length = Math.hypot(deltaX, deltaZ);
+    if (length === 0) {
+      return;
+    }
+    const normalX = orientation * deltaZ / length;
+    const normalZ = orientation * -deltaX / length;
+    offsets[edgeIndex].x += normalX * delta;
+    offsets[edgeIndex].z += normalZ * delta;
+    offsets[endIndex].x += normalX * delta;
+    offsets[endIndex].z += normalZ * delta;
+  });
+
+  return points.map((point, index) => ({
+    x: point.x + offsets[index].x,
+    z: point.z + offsets[index].z,
+  }));
+}
+
 export default function Home() {
   const [viewMode, setViewMode] = useState<ViewMode>("split");
   const [command, setCommand] = useState<DrawCommand>("select");
@@ -293,7 +333,6 @@ export default function Home() {
   const [relationships, setRelationships] = useState<EdgeRelationship[]>(
     INITIAL_ROOF_POINTS.map(() => ({
       conditionId: "rafter-seat",
-      overhang: 1.5,
       elevationOffset: 0,
     })),
   );
@@ -408,7 +447,6 @@ export default function Home() {
     const fallbackId = compatibleEaveDetails[0]?.id ?? "";
     const nextRelationships = roofPoints.map(() => ({
       conditionId: fallbackId,
-      overhang: 1.5,
       elevationOffset: 0,
     }));
     setRelationships(nextRelationships);
@@ -431,7 +469,6 @@ export default function Home() {
     setRelationships(
       INITIAL_ROOF_POINTS.map(() => ({
         conditionId: "rafter-seat",
-        overhang: 1.5,
         elevationOffset: 0,
       })),
     );
@@ -457,6 +494,20 @@ export default function Home() {
     edgeIndex: number,
     changes: Partial<EdgeRelationship>,
   ) => {
+    if (changes.conditionId !== undefined) {
+      const previous = eaveCatalog.find(
+        (condition) => condition.id === relationships[edgeIndex]?.conditionId,
+      );
+      const next = eaveCatalog.find(
+        (condition) => condition.id === changes.conditionId,
+      );
+      if (previous !== undefined && next !== undefined) {
+        const delta = (next.parameters.overhang - previous.parameters.overhang) / 12;
+        setRoofPoints((current) =>
+          shiftRoofEdgesByOverhang(current, [{ edgeIndex, delta }]),
+        );
+      }
+    }
     setRelationships((current) =>
       current.map((relationship, index) =>
         index === edgeIndex
@@ -473,6 +524,22 @@ export default function Home() {
     if (fallback === undefined) {
       return;
     }
+    const overhangChanges = relationships.flatMap((relationship, edgeIndex) => {
+      const currentDetail = eaveCatalog.find(
+        (condition) => condition.id === relationship.conditionId,
+      );
+      if (currentDetail === undefined || currentDetail.systemType === systemType) {
+        return [];
+      }
+      return [{
+        edgeIndex,
+        delta:
+          (fallback.parameters.overhang - currentDetail.parameters.overhang) / 12,
+      }];
+    });
+    setRoofPoints((current) =>
+      shiftRoofEdgesByOverhang(current, overhangChanges),
+    );
     setRoofSystemType(systemType);
     setRelationships((current) =>
       current.map((relationship) => {
@@ -540,6 +607,30 @@ export default function Home() {
           ? parameters.seatCut / 12
           : 0,
     };
+    if (detailEditor.id !== null) {
+      const previous = eaveCatalog.find((item) => item.id === detailEditor.id);
+      if (previous !== undefined) {
+        const replacement =
+          condition.systemType === roofSystemType
+            ? condition
+            : eaveCatalog.find(
+                (item) =>
+                  item.id !== detailEditor.id &&
+                  item.systemType === roofSystemType,
+              );
+        const delta = replacement === undefined
+          ? 0
+          : (replacement.parameters.overhang - previous.parameters.overhang) / 12;
+        const subscribedEdges = relationships.flatMap((relationship, edgeIndex) =>
+          relationship.conditionId === detailEditor.id
+            ? [{ edgeIndex, delta }]
+            : [],
+        );
+        setRoofPoints((current) =>
+          shiftRoofEdgesByOverhang(current, subscribedEdges),
+        );
+      }
+    }
     setEaveCatalog((current) => {
       if (detailEditor.id === null) {
         return [...current, condition];
@@ -576,12 +667,23 @@ export default function Home() {
   const deleteCatalog = () => {
     if (selection?.kind !== "catalog" || eaveCatalog.length <= 1) return;
     const selected = eaveCatalog.find((condition) => condition.id === selection.id);
+    if (selected === undefined) return;
     const fallback = eaveCatalog.find(
       (condition) =>
         condition.id !== selection.id &&
-        condition.systemType === selected?.systemType,
+        condition.systemType === selected.systemType,
     );
     if (!fallback) return;
+    const selectedOverhang = selected.parameters.overhang;
+    const replacementOverhang = fallback.parameters.overhang;
+    const overhangChanges = relationships.flatMap((relationship, edgeIndex) =>
+      relationship.conditionId === selection.id
+        ? [{ edgeIndex, delta: (replacementOverhang - selectedOverhang) / 12 }]
+        : [],
+    );
+    setRoofPoints((current) =>
+      shiftRoofEdgesByOverhang(current, overhangChanges),
+    );
     setRelationships((current) =>
       current.map((relationship) =>
         relationship.conditionId === selection.id
@@ -2318,27 +2420,12 @@ export default function Home() {
                     above plate
                   </span>
                 </div>
-                <label>
-                  <span>Independent overhang</span>
-                  <div className="height-input">
-                    <input
-                      type="number"
-                      min={0}
-                      max={8}
-                      step={0.25}
-                      value={relationships[selection.index]?.overhang ?? 0}
-                      onChange={(event) =>
-                        updateRelationship(selection.index, {
-                          overhang: Math.max(
-                            0,
-                            Math.min(8, Number(event.target.value) || 0),
-                          ),
-                        })
-                      }
-                    />
-                    <span>ft</span>
-                  </div>
-                </label>
+                <div className="condition-coordinate compact">
+                  <span>Catalog overhang</span>
+                  <strong>
+                    {(conditionForEdge(selection.index)?.parameters.overhang ?? 0).toFixed(2)}″
+                  </strong>
+                </div>
               </div>
               <div className="detail-inspector-note">
                 This eave is independently positioned from the fixed roof base.
