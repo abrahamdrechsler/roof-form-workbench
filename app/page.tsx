@@ -1372,10 +1372,10 @@ export default function Home() {
         x: (bounds.minX + bounds.maxX) / 2,
         z: (bounds.minZ + bounds.maxZ) / 2,
       };
-      const width = bounds.maxX - bounds.minX;
-      const depth = bounds.maxZ - bounds.minZ;
+      const roofWidth = bounds.maxX - bounds.minX;
+      const roofDepth = bounds.maxZ - bounds.minZ;
       const nominalSlope = Math.max(0.01, pitch / 12);
-      const shortSpan = Math.min(width, depth);
+      const shortSpan = Math.min(roofWidth, roofDepth);
       const ridgeInset = shortSpan / 2;
       const rise = Math.max(0.25, ridgeInset * nominalSlope);
       const ridgeA: Point3 = dominantX
