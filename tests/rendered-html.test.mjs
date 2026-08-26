@@ -131,6 +131,24 @@ test("room-owned ceiling keeps outside framing and inside finish as clipped soli
   assert.match(page, /ceilingHeightDrag\.current/);
 });
 
+test("truss systems use a guarded closed envelope and a roof-driven finish-only ceiling", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+
+  assert.match(page, /const isTrussRoof = roofSystemType !== "rafter"/);
+  assert.match(page, /const trussEnvelopeIssue =/);
+  assert.match(page, /supports the Gable roof form only/);
+  assert.match(page, /requires equal bearing elevations on every roof edge/);
+  assert.match(page, /solidId: "truss-envelope"/);
+  assert.match(page, /const trussEnvelopeFaces =/);
+  assert.match(page, /Closed triangular prism/);
+  assert.match(page, /if \(isTrussRoof\) \{/);
+  assert.match(page, /ceiling-\$\{ceiling\.id\}-truss-finish/);
+  assert.match(page, /Integrated truss bottom chord · separate layer disabled/);
+  assert.match(page, /stored rafter ceiling height and framing depth remain untouched/);
+  assert.match(page, /\{!isTrussRoof && \(/);
+  assert.match(page, /Experimental limitation/);
+});
+
 test("higher roof bearings create separate derived wall supports", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 

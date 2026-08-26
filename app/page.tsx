@@ -222,6 +222,46 @@ function midpoint(start: Point2, end: Point2): Point2 {
   return { x: (start.x + end.x) / 2, z: (start.z + end.z) / 2 };
 }
 
+function axisAlignedRectangleBounds(points: Point2[]) {
+  if (points.length !== 4) return null;
+  const minX = Math.min(...points.map((point) => point.x));
+  const maxX = Math.max(...points.map((point) => point.x));
+  const minZ = Math.min(...points.map((point) => point.z));
+  const maxZ = Math.max(...points.map((point) => point.z));
+  if (maxX - minX < 0.01 || maxZ - minZ < 0.01) return null;
+  const tolerance = 0.01;
+  const cornerKeys = new Set(
+    points.map((point) => {
+      const x = Math.abs(point.x - minX) <= tolerance
+        ? "min"
+        : Math.abs(point.x - maxX) <= tolerance
+          ? "max"
+          : "invalid";
+      const z = Math.abs(point.z - minZ) <= tolerance
+        ? "min"
+        : Math.abs(point.z - maxZ) <= tolerance
+          ? "max"
+          : "invalid";
+      return `${x}:${z}`;
+    }),
+  );
+  const edgesAreOrthogonal = points.every((point, index) => {
+    const next = points[(index + 1) % points.length];
+    return (
+      Math.abs(point.x - next.x) <= tolerance ||
+      Math.abs(point.z - next.z) <= tolerance
+    );
+  });
+  if (
+    !edgesAreOrthogonal ||
+    cornerKeys.size !== 4 ||
+    [...cornerKeys].some((key) => key.includes("invalid"))
+  ) {
+    return null;
+  }
+  return { minX, maxX, minZ, maxZ };
+}
+
 function pointToSegmentDistance(point: Point2, start: Point2, end: Point2) {
   const deltaX = end.x - start.x;
   const deltaZ = end.z - start.z;
@@ -1244,6 +1284,35 @@ export default function Home() {
     [relationships, roofBase],
   );
 
+  const isTrussRoof = roofSystemType !== "rafter";
+  const trussWallBounds = useMemo(
+    () => axisAlignedRectangleBounds(wallPoints),
+    [wallPoints],
+  );
+  const trussRoofBounds = useMemo(
+    () => axisAlignedRectangleBounds(roofPoints),
+    [roofPoints],
+  );
+  const trussEdgeElevations = roofEdges.map((edge) => edgeElevation(edge.index));
+  const trussBearingElevation = trussEdgeElevations[0] ?? roofBase;
+  const trussEnvelopeIssue = !isTrussRoof
+    ? null
+    : !roofClosed || !wallsClosed
+      ? "Close both the wall and roof boundaries to generate the experimental truss envelope."
+      : roofKind !== "gable"
+        ? "The first truss-envelope primitive supports the Gable roof form only."
+        : trussWallBounds === null || trussRoofBounds === null
+          ? "The first truss-envelope primitive requires rectangular wall and roof boundaries."
+          : trussEdgeElevations.some(
+                (elevation) =>
+                  Math.abs(elevation - trussBearingElevation) > 0.001,
+              )
+            ? "The first truss-envelope primitive requires equal bearing elevations on every roof edge."
+            : null;
+  const ceilingDatumElevation = isTrussRoof
+    ? trussBearingElevation
+    : ceiling.bottomOfFramingElevationFeet;
+
   const derivedSupportForWall = useCallback(
     (wallIndex: number) => {
       const wall = walls[wallIndex];
@@ -1688,15 +1757,17 @@ export default function Home() {
       context.stroke();
     }
 
-    if (showCeiling && structuralCeilingFootprint.length >= 3) {
+    if (showCeiling && finishCeilingFootprint.length >= 3) {
       const selected = selection?.kind === "ceiling";
-      drawPolygon(
-        context,
-        structuralCeilingFootprint.map(project),
-        selected ? "rgba(38, 127, 103, 0.13)" : "rgba(38, 127, 103, 0.05)",
-        selected ? "#175c4c" : "rgba(23, 92, 76, 0.38)",
-        selected ? 2.5 : 1,
-      );
+      if (!isTrussRoof) {
+        drawPolygon(
+          context,
+          structuralCeilingFootprint.map(project),
+          selected ? "rgba(38, 127, 103, 0.13)" : "rgba(38, 127, 103, 0.05)",
+          selected ? "#175c4c" : "rgba(23, 92, 76, 0.38)",
+          selected ? 2.5 : 1,
+        );
+      }
       drawPolygon(
         context,
         finishCeilingFootprint.map(project),
@@ -1719,7 +1790,7 @@ export default function Home() {
       context.font = "700 8px monospace";
       context.textAlign = "center";
       context.fillText(
-        `CEILING · ${feetInches(ceiling.bottomOfFramingElevationFeet)}`,
+        `${isTrussRoof ? "TRUSS CEILING FINISH" : "CEILING"} · ${feetInches(ceilingDatumElevation)}`,
         label.x,
         label.y + 3,
       );
@@ -1882,9 +1953,10 @@ export default function Home() {
     context.fillText("12″ × 12″ SNAP GRID", 14, 22);
   }, [
     command,
-    ceiling.bottomOfFramingElevationFeet,
+    ceilingDatumElevation,
     derivedSupportForWall,
     finishCeilingFootprint,
+    isTrussRoof,
     pointerWorld,
     roofClosed,
     roofEdges,
@@ -2442,6 +2514,28 @@ export default function Home() {
         });
       };
 
+      if (isTrussRoof) {
+        const finishTop = ceilingDatumElevation;
+        const finishBottom = finishTop - finishThickness;
+        addClosedLayer({
+          footprint: finishCeilingFootprint,
+          solidId: `ceiling-${ceiling.id}-truss-finish`,
+          topAt: () => finishTop,
+          bottomAt: () => finishBottom,
+          topFill: () => (selectedCeiling ? "#eee8dd" : "#e7e1d7"),
+          bottomFill: selectedCeiling ? "#f6f2eb" : "#eeeae3",
+          sideFill: "#ded7cc",
+          stroke: selectedCeiling ? "#766e63" : "#aaa399",
+        });
+        ceilingOutline = selectedCeiling
+          ? finishCeilingFootprint.map((point) =>
+              project({ ...point, y: finishBottom }),
+            )
+          : [];
+        setCeilingHandlePosition((current) => (current ? null : current));
+        return;
+      }
+
       addClosedLayer({
         footprint: structuralCeilingFootprint,
         solidId: `ceiling-${ceiling.id}-framing`,
@@ -2958,6 +3052,166 @@ export default function Home() {
           points: [...outerBoundary, ...definition.mainTargets],
         };
       });
+
+      if (isTrussRoof) {
+        const bottomChordElevation = trussBearingElevation;
+        addWallSurfaces(() => bottomChordElevation);
+        addDerivedRoofSupportSurfaces(() => bottomChordElevation);
+        addCeilingSurfaces(
+          () => bottomChordElevation,
+          () => bottomChordElevation,
+        );
+
+        if (trussEnvelopeIssue === null && trussRoofBounds !== null) {
+          const lengthRunsAlongX =
+            trussRoofBounds.maxX - trussRoofBounds.minX >=
+            trussRoofBounds.maxZ - trussRoofBounds.minZ;
+          const shortSpan = lengthRunsAlongX
+            ? trussRoofBounds.maxZ - trussRoofBounds.minZ
+            : trussRoofBounds.maxX - trussRoofBounds.minX;
+          const apexElevation =
+            bottomChordElevation + (shortSpan / 2) * nominalSlope;
+          const profileAt = (lengthCoordinate: number): Point3[] =>
+            lengthRunsAlongX
+              ? [
+                  {
+                    x: lengthCoordinate,
+                    y: bottomChordElevation,
+                    z: trussRoofBounds.minZ,
+                  },
+                  {
+                    x: lengthCoordinate,
+                    y: bottomChordElevation,
+                    z: trussRoofBounds.maxZ,
+                  },
+                  {
+                    x: lengthCoordinate,
+                    y: apexElevation,
+                    z: (trussRoofBounds.minZ + trussRoofBounds.maxZ) / 2,
+                  },
+                ]
+              : [
+                  {
+                    x: trussRoofBounds.minX,
+                    y: bottomChordElevation,
+                    z: lengthCoordinate,
+                  },
+                  {
+                    x: trussRoofBounds.maxX,
+                    y: bottomChordElevation,
+                    z: lengthCoordinate,
+                  },
+                  {
+                    x: (trussRoofBounds.minX + trussRoofBounds.maxX) / 2,
+                    y: apexElevation,
+                    z: lengthCoordinate,
+                  },
+                ];
+          const startProfile = profileAt(
+            lengthRunsAlongX ? trussRoofBounds.minX : trussRoofBounds.minZ,
+          );
+          const endProfile = profileAt(
+            lengthRunsAlongX ? trussRoofBounds.maxX : trussRoofBounds.maxZ,
+          );
+          const trussEnvelopeFaces = [
+            startProfile,
+            [...endProfile].reverse(),
+            [startProfile[0], endProfile[0], endProfile[1], startProfile[1]],
+            [startProfile[0], startProfile[2], endProfile[2], endProfile[0]],
+            [startProfile[2], startProfile[1], endProfile[1], endProfile[2]],
+          ];
+          const selectedRoof = selection?.kind === "roof";
+          trussEnvelopeFaces.forEach((points, faceIndex) => {
+            formRoofRegions.current.push(points.map(project));
+            modelSurfaces.push({
+              points,
+              pick: { kind: "roof" },
+              solidId: "truss-envelope",
+              fill: selectedRoof
+                ? faceIndex < 2
+                  ? "#c96f32"
+                  : "#e38a4d"
+                : faceIndex < 2
+                  ? "#c77a45"
+                  : faceIndex === 2
+                    ? "#b96b3d"
+                    : "#df8347",
+              stroke: selectedRoof ? "#171512" : "#8d542f",
+              lineWidth: selectedRoof ? 2.2 : 1.15,
+            });
+          });
+        }
+
+        roofEdges.forEach((edge) => {
+          const profile = [
+            { ...edge.start, y: edgeElevation(edge.index) },
+            { ...edge.end, y: edgeElevation(edge.index) },
+          ];
+          const projectedProfile = profile.map(project);
+          formEaveRegions.current.push({
+            index: edge.index,
+            points: projectedProfile,
+          });
+          const selectedEdge =
+            selection?.kind === "roof-edge" && selection.index === edge.index;
+          eaveMarkers.push({
+            point: {
+              x: (projectedProfile[0].x + projectedProfile[1].x) / 2,
+              y: (projectedProfile[0].y + projectedProfile[1].y) / 2,
+            },
+            selected: selectedEdge,
+          });
+        });
+
+        renderClippedModel();
+
+        if (selection?.kind === "ceiling" && ceilingOutline.length >= 3) {
+          context.save();
+          context.setLineDash([7, 5]);
+          context.strokeStyle = "#766e63";
+          context.lineWidth = 2.5;
+          context.beginPath();
+          context.moveTo(ceilingOutline[0].x, ceilingOutline[0].y);
+          ceilingOutline
+            .slice(1)
+            .forEach((point) => context.lineTo(point.x, point.y));
+          context.closePath();
+          context.stroke();
+          context.restore();
+        }
+
+        eaveMarkers.forEach(({ point, selected }) => {
+          context.beginPath();
+          context.arc(point.x, point.y, selected ? 6 : 3.5, 0, Math.PI * 2);
+          context.fillStyle = selected ? "#16838a" : "#fff";
+          context.fill();
+          context.strokeStyle = selected ? "#16838a" : "#a95829";
+          context.lineWidth = 1.25;
+          context.stroke();
+        });
+
+        if (trussEnvelopeIssue !== null) {
+          context.fillStyle = "rgba(255, 247, 237, 0.96)";
+          context.fillRect(14, 14, Math.min(470, width - 28), 48);
+          context.strokeStyle = "#c66a2b";
+          context.strokeRect(14, 14, Math.min(470, width - 28), 48);
+          context.fillStyle = "#9b461f";
+          context.font = "700 9px monospace";
+          context.fillText("EXPERIMENTAL TRUSS ENVELOPE PAUSED", 24, 33);
+          context.font = "600 8px sans-serif";
+          context.fillText(trussEnvelopeIssue, 24, 50);
+        } else if (showDatums) {
+          context.fillStyle = "#9b461f";
+          context.font = "700 8px monospace";
+          context.fillText(
+            `TRUSS BOTTOM CHORD · ${feetInches(bottomChordElevation)}`,
+            16,
+            24,
+          );
+        }
+        return;
+      }
+
       // Roof topology follows the authored boundary: one continuous surface
       // per roof edge. A bearing offset may warp that surface, but it must not
       // create additional architectural faces or visible diagonal creases.
@@ -3292,6 +3546,7 @@ export default function Home() {
     center.x,
     center.z,
     ceiling,
+    ceilingDatumElevation,
     clipWalls,
     derivedSupportForWall,
     edgeElevation,
@@ -3314,6 +3569,10 @@ export default function Home() {
     showTopology,
     showWalls,
     structuralCeilingFootprint,
+    isTrussRoof,
+    trussBearingElevation,
+    trussEnvelopeIssue,
+    trussRoofBounds,
     wallHeights,
     wallThicknesses,
     wallPoints,
@@ -4118,7 +4377,9 @@ export default function Home() {
                 <span aria-hidden="true" />
                 Section box
               </button>
-              {selection?.kind === "ceiling" && ceilingHandlePosition && (
+              {selection?.kind === "ceiling" &&
+                !isTrussRoof &&
+                ceilingHandlePosition && (
                 <button
                   className="wall-height-handle ceiling-height-handle"
                   style={{
@@ -4292,69 +4553,74 @@ export default function Home() {
                 onClose={() => setSelection(null)}
               />
               <div className="inspector-selection-summary">
-                <span>Two closed solids · {PRIMARY_ROOM.name}</span>
-                <strong>Outside framing + inside finish</strong>
+                <span>
+                  {isTrussRoof ? "One roof-driven solid" : "Two closed solids"} ·{" "}
+                  {PRIMARY_ROOM.name}
+                </span>
+                <strong>
+                  {isTrussRoof
+                    ? "Finish beneath bottom chord"
+                    : "Outside framing + inside finish"}
+                </strong>
               </div>
-              <div className="detail-form inspector-properties">
-                <label>
-                  <span>Bottom of ceiling framing</span>
-                  <div className="height-input">
-                    <input
-                      type="number"
-                      min={4}
-                      max={30}
-                      step={0.25}
-                      value={ceilingHeightDraft}
-                      onChange={(event) => {
-                        setCeilingHeightDraft(event.target.value);
-                        const value = Number(event.target.value);
-                        if (Number.isFinite(value) && value >= 4 && value <= 30) {
-                          setCeiling((current) => ({
-                            ...current,
-                            bottomOfFramingElevationFeet: value,
-                          }));
-                        }
-                      }}
-                    />
-                    <span>ft</span>
-                  </div>
-                </label>
-                <Range
-                  label="Ceiling height"
-                  value={ceiling.bottomOfFramingElevationFeet}
-                  min={4}
-                  max={30}
-                  step={0.25}
-                  output={feetInches(ceiling.bottomOfFramingElevationFeet)}
-                  onChange={(value) => {
-                    setCeiling((current) => ({
-                      ...current,
-                      bottomOfFramingElevationFeet: value,
-                    }));
-                    setCeilingHeightDraft(value.toFixed(2));
-                  }}
-                />
-              </div>
+              {!isTrussRoof && (
+                <div className="detail-form inspector-properties">
+                  <label>
+                    <span>Bottom of ceiling framing</span>
+                    <div className="height-input">
+                      <input
+                        type="number"
+                        min={4}
+                        max={30}
+                        step={0.25}
+                        value={ceilingHeightDraft}
+                        onChange={(event) => {
+                          setCeilingHeightDraft(event.target.value);
+                          const value = Number(event.target.value);
+                          if (
+                            Number.isFinite(value) &&
+                            value >= 4 &&
+                            value <= 30
+                          ) {
+                            setCeiling((current) => ({
+                              ...current,
+                              bottomOfFramingElevationFeet: value,
+                            }));
+                          }
+                        }}
+                      />
+                      <span>ft</span>
+                    </div>
+                  </label>
+                  <Range
+                    label="Ceiling height"
+                    value={ceiling.bottomOfFramingElevationFeet}
+                    min={4}
+                    max={30}
+                    step={0.25}
+                    output={feetInches(ceiling.bottomOfFramingElevationFeet)}
+                    onChange={(value) => {
+                      setCeiling((current) => ({
+                        ...current,
+                        bottomOfFramingElevationFeet: value,
+                      }));
+                      setCeilingHeightDraft(value.toFixed(2));
+                    }}
+                  />
+                </div>
+              )}
               <div className="detail-inspector-note">
-                Ceiling framing remains full-depth and horizontal through the
-                wall to its outside face wherever that face remains inside the
-                roof footprint, overlapping roof structure where they meet.
-                Only an upper outside corner that reaches the roof finish layer
-                is cut back along that layer. The ceiling finish remains bounded
-                by both the inward wall faces and the roof footprint.
+                {isTrussRoof
+                  ? "This truss system owns the structural bottom chord. The room ceiling is finish only, attached immediately beneath that roof-driven plane. Its stored rafter ceiling height and framing depth remain untouched and return when Rafter is selected."
+                  : "Ceiling framing remains full-depth and horizontal through the wall to its outside face wherever that face remains inside the roof footprint, overlapping roof structure where they meet. Only an upper outside corner that reaches the roof finish layer is cut back along that layer. The ceiling finish remains bounded by both the inward wall faces and the roof footprint."}
               </div>
               <dl className="inspector-data">
                 <div>
                   <dt>Structural framing</dt>
                   <dd>
-                    {ceiling.framingThicknessInches.toFixed(1)}″ upward ·{" "}
-                    {feetInches(
-                      structuralCeilingBounds.maxX - structuralCeilingBounds.minX,
-                    )}{" "}
-                    ×{" "}
-                    {feetInches(
-                      structuralCeilingBounds.maxZ - structuralCeilingBounds.minZ,
-                    )}
+                    {isTrussRoof
+                      ? "Integrated truss bottom chord · separate layer disabled"
+                      : `${ceiling.framingThicknessInches.toFixed(1)}″ upward · ${feetInches(structuralCeilingBounds.maxX - structuralCeilingBounds.minX)} × ${feetInches(structuralCeilingBounds.maxZ - structuralCeilingBounds.minZ)}`}
                   </dd>
                 </div>
                 <div>
@@ -4367,12 +4633,18 @@ export default function Home() {
                 </div>
                 <div>
                   <dt>Roof clipping limit</dt>
-                  <dd>Plan clipped to roof · corner cuts at roof finish only</dd>
+                  <dd>
+                    {isTrussRoof
+                      ? "Interior wall faces · roof-contained plan"
+                      : "Plan clipped to roof · corner cuts at roof finish only"}
+                  </dd>
                 </div>
                 <div>
-                  <dt>Default datum</dt>
+                  <dt>{isTrussRoof ? "Driven datum" : "Default datum"}</dt>
                   <dd>
-                    {wallsSharePlateHeight
+                    {isTrussRoof
+                      ? `Truss bottom chord · ${feetInches(trussBearingElevation)}`
+                      : wallsSharePlateHeight
                       ? `Shared plate · ${feetInches(wallHeights[0])}`
                       : "Explicit · wall plates differ"}
                   </dd>
@@ -4450,6 +4722,12 @@ export default function Home() {
                 derived segment continues upward and is trimmed to the sloped
                 roof underside; it does not rewrite this wall.
               </div>
+              {isTrussRoof && trussEnvelopeIssue !== null && (
+                <div className="detail-inspector-note experimental-warning">
+                  <strong>Experimental limitation</strong>
+                  <span>{trussEnvelopeIssue}</span>
+                </div>
+              )}
               <dl className="inspector-data">
                 <div>
                   <dt>Authored top</dt>
@@ -4554,48 +4832,58 @@ export default function Home() {
                   output={`${pitch.toFixed(1)}:12`}
                   onChange={setPitch}
                 />
-                <label>
-                  <span>Shared structural depth</span>
-                  <div className="height-input">
-                    <input
-                      type="number"
-                      min={3.5}
-                      max={15.25}
-                      step={0.125}
-                      value={roofAssembly.structuralDepthInches}
-                      onChange={(event) => {
-                        const value = Number(event.target.value);
-                        if (Number.isFinite(value)) {
-                          updateRoofAssembly({
-                            structuralDepthInches: Math.max(3.5, Math.min(15.25, value)),
-                          });
-                        }
-                      }}
-                    />
-                    <span>in</span>
-                  </div>
-                </label>
-                <label>
-                  <span>Shared roof build-up</span>
-                  <div className="height-input">
-                    <input
-                      type="number"
-                      min={0.125}
-                      max={4}
-                      step={0.125}
-                      value={roofAssembly.buildUpThicknessInches}
-                      onChange={(event) => {
-                        const value = Number(event.target.value);
-                        if (Number.isFinite(value)) {
-                          updateRoofAssembly({
-                            buildUpThicknessInches: Math.max(0.125, Math.min(4, value)),
-                          });
-                        }
-                      }}
-                    />
-                    <span>in</span>
-                  </div>
-                </label>
+                {!isTrussRoof && (
+                  <>
+                    <label>
+                      <span>Shared structural depth</span>
+                      <div className="height-input">
+                        <input
+                          type="number"
+                          min={3.5}
+                          max={15.25}
+                          step={0.125}
+                          value={roofAssembly.structuralDepthInches}
+                          onChange={(event) => {
+                            const value = Number(event.target.value);
+                            if (Number.isFinite(value)) {
+                              updateRoofAssembly({
+                                structuralDepthInches: Math.max(
+                                  3.5,
+                                  Math.min(15.25, value),
+                                ),
+                              });
+                            }
+                          }}
+                        />
+                        <span>in</span>
+                      </div>
+                    </label>
+                    <label>
+                      <span>Shared roof build-up</span>
+                      <div className="height-input">
+                        <input
+                          type="number"
+                          min={0.125}
+                          max={4}
+                          step={0.125}
+                          value={roofAssembly.buildUpThicknessInches}
+                          onChange={(event) => {
+                            const value = Number(event.target.value);
+                            if (Number.isFinite(value)) {
+                              updateRoofAssembly({
+                                buildUpThicknessInches: Math.max(
+                                  0.125,
+                                  Math.min(4, value),
+                                ),
+                              });
+                            }
+                          }}
+                        />
+                        <span>in</span>
+                      </div>
+                    </label>
+                  </>
+                )}
                 <label className="inspector-toggle">
                   <span>
                     <strong>Clip walls at roof</strong>
@@ -4612,11 +4900,16 @@ export default function Home() {
                 </label>
               </div>
               <div className="detail-inspector-note">
-                Set bearing to the wall top-plate elevation. The structural
-                underside stays fixed at the wall line; increasing member depth
-                grows the roof upward. Wall changes do not move this explicit
-                datum automatically.
+                {isTrussRoof
+                  ? "Experimental truss mode replaces the thin rafter-layer representation with one closed envelope solid. Its flat bottom chord follows the shared bearing plane and its sloped top follows the gable profile. Individual webs and repeated trusses are intentionally not modeled yet."
+                  : "Set bearing to the wall top-plate elevation. The structural underside stays fixed at the wall line; increasing member depth grows the roof upward. Wall changes do not move this explicit datum automatically."}
               </div>
+              {isTrussRoof && trussEnvelopeIssue !== null && (
+                <div className="detail-inspector-note experimental-warning">
+                  <strong>Experimental limitation</strong>
+                  <span>{trussEnvelopeIssue}</span>
+                </div>
+              )}
               <dl className="inspector-data">
                 <div>
                   <dt>Overall structural system</dt>
@@ -4635,9 +4928,13 @@ export default function Home() {
                   <dd>{pitch.toFixed(1)}:12</dd>
                 </div>
                 <div>
-                  <dt>Thickness</dt>
+                  <dt>{isTrussRoof ? "Geometry" : "Thickness"}</dt>
                   <dd>
-                    {roofAssembly.structuralDepthInches.toFixed(3)}″ structure + {roofAssembly.buildUpThicknessInches.toFixed(3)}″ build-up
+                    {isTrussRoof
+                      ? trussEnvelopeIssue === null
+                        ? `Closed triangular prism · bottom chord ${feetInches(trussBearingElevation)}`
+                        : "Envelope paused"
+                      : `${roofAssembly.structuralDepthInches.toFixed(3)}″ structure + ${roofAssembly.buildUpThicknessInches.toFixed(3)}″ build-up`}
                   </dd>
                 </div>
               </dl>
@@ -4776,6 +5073,12 @@ export default function Home() {
                 down to meet them. Raising it keeps the neighboring roof
                 surfaces continuous without creating extra roof faces.
               </div>
+              {isTrussRoof && trussEnvelopeIssue !== null && (
+                <div className="detail-inspector-note experimental-warning">
+                  <strong>Experimental limitation</strong>
+                  <span>{trussEnvelopeIssue}</span>
+                </div>
+              )}
               <dl className="inspector-data">
                 <div>
                   <dt>Shared bearing elevation</dt>
@@ -4841,9 +5144,9 @@ export default function Home() {
               </div>
               <h2>Room, ceiling, and roof are coordinated</h2>
               <p>
-                The room owns outside-to-outside ceiling framing and a separate
-                finish bounded by the interior wall faces. Select the ceiling,
-                roof, a wall, or an edge to edit its properties.
+                {isTrussRoof
+                  ? "The roof owns the truss bottom chord and drives a finish-only ceiling bounded by the interior wall faces. Select the ceiling, roof, a wall, or an edge to inspect the experiment."
+                  : "The room owns outside-to-outside ceiling framing and a separate finish bounded by the interior wall faces. Select the ceiling, roof, a wall, or an edge to edit its properties."}
               </p>
               <dl className="model-counts">
                 <div>
@@ -4885,9 +5188,11 @@ export default function Home() {
         </span>
         <span>
           {SYSTEM_LABELS[roofSystemType]} roof ·{" "}
-          {roofAssembly.structuralDepthInches.toFixed(3)}″ structure +{" "}
-          {roofAssembly.buildUpThicknessInches.toFixed(3)}″ build-up · ceiling framing bottom{" "}
-          {feetInches(ceiling.bottomOfFramingElevationFeet)}
+          {isTrussRoof
+            ? trussEnvelopeIssue === null
+              ? `closed truss envelope · bottom chord ${feetInches(trussBearingElevation)} · finish-only ceiling`
+              : "experimental envelope paused · see roof warning"
+            : `${roofAssembly.structuralDepthInches.toFixed(3)}″ structure + ${roofAssembly.buildUpThicknessInches.toFixed(3)}″ build-up · ceiling framing bottom ${feetInches(ceiling.bottomOfFramingElevationFeet)}`}
         </span>
       </footer>
       {detailEditor !== null ? (
