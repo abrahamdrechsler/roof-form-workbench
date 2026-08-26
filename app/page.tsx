@@ -20,6 +20,9 @@ type EaveDriver = "heel" | "seat";
 type Point2 = { x: number; z: number };
 type Point3 = { x: number; y: number; z: number };
 type ScreenPoint = { x: number; y: number };
+
+const SPLIT_DIVIDER_WIDTH = 9;
+const SPLIT_MIN_PANE_WIDTH = 220;
 type DepthPoint = ScreenPoint & { depth: number };
 type DepthSurface = {
   points: DepthPoint[];
@@ -32,6 +35,18 @@ type DepthLine = {
   stroke: string;
   lineWidth: number;
 };
+type ModelSurface = Omit<DepthSurface, "points"> & { points: Point3[] };
+type ModelLine = Omit<DepthLine, "points"> & { points: Point3[] };
+type SectionBounds = {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  minZ: number;
+  maxZ: number;
+};
+type SectionFace = keyof SectionBounds;
+type StudSize = 3.5 | 5.5 | 11.25;
 type EaveCondition = {
   id: string;
   name: string;
@@ -65,6 +80,21 @@ const INITIAL_ROOF_POINTS: Point2[] = [
   { x: 16, z: 22 },
   { x: -16, z: 22 },
 ];
+
+const INITIAL_SECTION_BOX: SectionBounds = {
+  minX: -18,
+  maxX: 18,
+  minY: -0.5,
+  maxY: 20,
+  minZ: -24,
+  maxZ: 24,
+};
+
+const STUD_SIZE_LABELS: Record<StudSize, string> = {
+  3.5: "2×4",
+  5.5: "2×6",
+  11.25: "2×12",
+};
 
 const INITIAL_EAVE_CONDITIONS: EaveCondition[] = [
   {
@@ -163,9 +193,11 @@ function pointToSegmentDistance(point: Point2, start: Point2, end: Point2) {
 
 function prepareCanvas(canvas: HTMLCanvasElement) {
   const rect = canvas.getBoundingClientRect();
-  const ratio = window.devicePixelRatio || 1;
-  canvas.width = Math.round(rect.width * ratio);
-  canvas.height = Math.round(rect.height * ratio);
+  const ratio = Math.min(2, window.devicePixelRatio || 1);
+  const pixelWidth = Math.round(rect.width * ratio);
+  const pixelHeight = Math.round(rect.height * ratio);
+  if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+  if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
   const context = canvas.getContext("2d");
   if (!context) return null;
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
@@ -286,6 +318,156 @@ function triangulateDepthPolygon(points: DepthPoint[]) {
   return triangles;
 }
 
+function roofHeightFromFaces(point: Point2, faces: Point3[][]) {
+  const heights: number[] = [];
+  faces.forEach((face) => {
+    const planPoints = face.map((vertex) => ({
+      x: vertex.x,
+      y: vertex.z,
+      depth: vertex.y,
+    }));
+    triangulateDepthPolygon(planPoints).forEach(([firstIndex, secondIndex, thirdIndex]) => {
+      const first = planPoints[firstIndex];
+      const second = planPoints[secondIndex];
+      const third = planPoints[thirdIndex];
+      const denominator =
+        (second.y - third.y) * (first.x - third.x) +
+        (third.x - second.x) * (first.y - third.y);
+      if (Math.abs(denominator) < 0.00001) return;
+      const firstWeight =
+        ((second.y - third.y) * (point.x - third.x) +
+          (third.x - second.x) * (point.z - third.y)) /
+        denominator;
+      const secondWeight =
+        ((third.y - first.y) * (point.x - third.x) +
+          (first.x - third.x) * (point.z - third.y)) /
+        denominator;
+      const thirdWeight = 1 - firstWeight - secondWeight;
+      if (
+        firstWeight < -0.0001 ||
+        secondWeight < -0.0001 ||
+        thirdWeight < -0.0001
+      ) {
+        return;
+      }
+      heights.push(
+        first.depth * firstWeight +
+          second.depth * secondWeight +
+          third.depth * thirdWeight,
+      );
+    });
+  });
+  return heights.length ? Math.min(...heights) : null;
+}
+
+function clipPolygonToSectionBox(points: Point3[], bounds: SectionBounds) {
+  const planes: {
+    inside: (point: Point3) => boolean;
+    intersection: (start: Point3, end: Point3) => Point3;
+  }[] = [
+    {
+      inside: (point) => point.x >= bounds.minX,
+      intersection: (start, end) =>
+        interpolatePoint3(start, end, (bounds.minX - start.x) / (end.x - start.x)),
+    },
+    {
+      inside: (point) => point.x <= bounds.maxX,
+      intersection: (start, end) =>
+        interpolatePoint3(start, end, (bounds.maxX - start.x) / (end.x - start.x)),
+    },
+    {
+      inside: (point) => point.y >= bounds.minY,
+      intersection: (start, end) =>
+        interpolatePoint3(start, end, (bounds.minY - start.y) / (end.y - start.y)),
+    },
+    {
+      inside: (point) => point.y <= bounds.maxY,
+      intersection: (start, end) =>
+        interpolatePoint3(start, end, (bounds.maxY - start.y) / (end.y - start.y)),
+    },
+    {
+      inside: (point) => point.z >= bounds.minZ,
+      intersection: (start, end) =>
+        interpolatePoint3(start, end, (bounds.minZ - start.z) / (end.z - start.z)),
+    },
+    {
+      inside: (point) => point.z <= bounds.maxZ,
+      intersection: (start, end) =>
+        interpolatePoint3(start, end, (bounds.maxZ - start.z) / (end.z - start.z)),
+    },
+  ];
+  return planes.reduce<Point3[]>((polygon, plane) => {
+    if (!polygon.length) return polygon;
+    const clipped: Point3[] = [];
+    polygon.forEach((end, index) => {
+      const start = polygon[(index + polygon.length - 1) % polygon.length];
+      const startInside = plane.inside(start);
+      const endInside = plane.inside(end);
+      if (startInside && endInside) clipped.push(end);
+      else if (startInside) clipped.push(plane.intersection(start, end));
+      else if (endInside) {
+        clipped.push(plane.intersection(start, end));
+        clipped.push(end);
+      }
+    });
+    return clipped;
+  }, points);
+}
+
+function interpolatePoint3(start: Point3, end: Point3, amount: number): Point3 {
+  return {
+    x: start.x + (end.x - start.x) * amount,
+    y: start.y + (end.y - start.y) * amount,
+    z: start.z + (end.z - start.z) * amount,
+  };
+}
+
+function clipSegmentToSectionBox(
+  start: Point3,
+  end: Point3,
+  bounds: SectionBounds,
+) {
+  let minimum = 0;
+  let maximum = 1;
+  const axes: [number, number, number, number][] = [
+    [start.x, end.x, bounds.minX, bounds.maxX],
+    [start.y, end.y, bounds.minY, bounds.maxY],
+    [start.z, end.z, bounds.minZ, bounds.maxZ],
+  ];
+  for (const [startValue, endValue, lower, upper] of axes) {
+    const direction = endValue - startValue;
+    if (Math.abs(direction) < 0.00001) {
+      if (startValue < lower || startValue > upper) return null;
+      continue;
+    }
+    const first = (lower - startValue) / direction;
+    const second = (upper - startValue) / direction;
+    minimum = Math.max(minimum, Math.min(first, second));
+    maximum = Math.min(maximum, Math.max(first, second));
+    if (minimum > maximum) return null;
+  }
+  return [
+    interpolatePoint3(start, end, minimum),
+    interpolatePoint3(start, end, maximum),
+  ] as [Point3, Point3];
+}
+
+function edgeOnSectionBoundary(
+  start: Point3,
+  end: Point3,
+  bounds: SectionBounds,
+) {
+  const tolerance = 0.002;
+  return (Object.keys(bounds) as SectionFace[]).some((face) => {
+    const coordinate = (point: Point3) =>
+      face.endsWith("X") ? point.x : face.endsWith("Y") ? point.y : point.z;
+    return (
+      Math.abs(coordinate(start) - bounds[face]) < tolerance &&
+      Math.abs(coordinate(end) - bounds[face]) < tolerance
+    );
+  });
+}
+
 function renderDepthScene(
   context: CanvasRenderingContext2D,
   canvas: HTMLCanvasElement,
@@ -294,8 +476,24 @@ function renderDepthScene(
   surfaces: DepthSurface[],
   lines: DepthLine[],
 ) {
-  const rasterWidth = Math.max(1, Math.ceil(width));
-  const rasterHeight = Math.max(1, Math.ceil(height));
+  const rasterScale = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+  const rasterWidth = Math.max(1, Math.ceil(width * rasterScale));
+  const rasterHeight = Math.max(1, Math.ceil(height * rasterScale));
+  const scalePoint = (point: DepthPoint): DepthPoint => ({
+    x: point.x * rasterScale,
+    y: point.y * rasterScale,
+    depth: point.depth,
+  });
+  const rasterSurfaces = surfaces.map((surface) => ({
+    ...surface,
+    points: surface.points.map(scalePoint),
+    lineWidth: surface.lineWidth * rasterScale,
+  }));
+  const rasterLines = lines.map((line) => ({
+    ...line,
+    points: line.points.map(scalePoint),
+    lineWidth: line.lineWidth * rasterScale,
+  }));
   const layer = document.createElement("canvas");
   layer.width = rasterWidth;
   layer.height = rasterHeight;
@@ -323,7 +521,7 @@ function renderDepthScene(
     image.data[colorIndex + 3] = 255;
   };
 
-  surfaces.forEach((surface) => {
+  rasterSurfaces.forEach((surface) => {
     const color = hexColor(surface.fill);
     triangulateDepthPolygon(surface.points).forEach((triangle) => {
       const first = surface.points[triangle[0]];
@@ -407,19 +605,20 @@ function renderDepthScene(
     });
   };
 
-  surfaces.forEach((surface) => {
+  rasterSurfaces.forEach((surface) => {
     renderLine({
       points: [...surface.points, surface.points[0]],
       stroke: surface.stroke,
       lineWidth: surface.lineWidth,
     });
   });
-  lines.forEach(renderLine);
+  rasterLines.forEach(renderLine);
 
   layerContext.putImageData(image, 0, 0);
   context.save();
   context.setTransform(1, 0, 0, 1, 0, 0);
   context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
   context.drawImage(layer, 0, 0, canvas.width, canvas.height);
   context.restore();
 }
@@ -459,6 +658,25 @@ function wallSegments(points: Point2[], closed: boolean) {
     });
   }
   return segments;
+}
+
+function wallInwardNormal(
+  wall: { start: Point2; end: Point2 },
+  points: Point2[],
+  closed: boolean,
+) {
+  const deltaX = wall.end.x - wall.start.x;
+  const deltaZ = wall.end.z - wall.start.z;
+  const length = Math.hypot(deltaX, deltaZ) || 1;
+  const signedArea = points.reduce((area, point, index) => {
+    const next = points[(index + 1) % points.length];
+    return area + point.x * next.z - next.x * point.z;
+  }, 0);
+  const inwardDirection = closed && signedArea < 0 ? -1 : 1;
+  return {
+    x: (-deltaZ / length) * inwardDirection,
+    z: (deltaX / length) * inwardDirection,
+  };
 }
 
 function roofSegments(points: Point2[], closed: boolean) {
@@ -543,12 +761,17 @@ function shiftRoofEdgesByOverhang(
 
 export default function Home() {
   const [viewMode, setViewMode] = useState<ViewMode>("split");
+  const [splitPosition, setSplitPosition] = useState(50);
+  const [isResizingSplit, setIsResizingSplit] = useState(false);
   const [command, setCommand] = useState<DrawCommand>("select");
   const [wallPoints, setWallPoints] = useState<Point2[]>(INITIAL_WALL_POINTS);
   const [wallsClosed, setWallsClosed] = useState(true);
   const [roofPoints, setRoofPoints] = useState<Point2[]>(INITIAL_ROOF_POINTS);
   const [roofClosed, setRoofClosed] = useState(true);
   const [wallHeights, setWallHeights] = useState([9, 9, 9, 9]);
+  const [wallThicknesses, setWallThicknesses] = useState<StudSize[]>([
+    5.5, 5.5, 5.5, 5.5,
+  ]);
   const [roofBase, setRoofBase] = useState(10);
   const [clipWalls, setClipWalls] = useState(false);
   const [pitch, setPitch] = useState(6);
@@ -564,6 +787,13 @@ export default function Home() {
     y: 0,
     z: 0,
   });
+  const [sectionBox, setSectionBox] = useState<SectionBounds>(INITIAL_SECTION_BOX);
+  const [showSectionBox, setShowSectionBox] = useState(true);
+  const [selectedSectionFace, setSelectedSectionFace] =
+    useState<SectionFace | null>(null);
+  const [sectionHandles, setSectionHandles] = useState<
+    Partial<Record<SectionFace, ScreenPoint & { axis: ScreenPoint }>>
+  >({});
   const [showWalls, setShowWalls] = useState(true);
   const [showTopology, setShowTopology] = useState(true);
   const [showDatums, setShowDatums] = useState(true);
@@ -592,6 +822,16 @@ export default function Home() {
 
   const planRef = useRef<HTMLCanvasElement>(null);
   const formRef = useRef<HTMLCanvasElement>(null);
+  const drawingAreaRef = useRef<HTMLElement>(null);
+  const splitDrag = useRef<{ pointerId: number } | null>(null);
+  const sectionDrag = useRef<{
+    pointerId: number;
+    face: SectionFace;
+    startX: number;
+    startY: number;
+    startValue: number;
+    screenAxis: ScreenPoint;
+  } | null>(null);
   const formScaleRef = useRef(1);
   const planScaleRef = useRef({ scale: 10, centerX: 0, centerY: 0 });
   const formWallRegions = useRef<
@@ -661,6 +901,7 @@ export default function Home() {
       setWallPoints([]);
       setWallsClosed(false);
       setWallHeights([]);
+      setWallThicknesses([]);
     }
     if (nextCommand === "roof") {
       setRoofPoints([]);
@@ -681,6 +922,10 @@ export default function Home() {
     setWallHeights((current) => [
       ...current.slice(0, wallPoints.length - 1),
       current[wallPoints.length - 1] ?? 9,
+    ]);
+    setWallThicknesses((current) => [
+      ...current.slice(0, wallPoints.length - 1),
+      current[wallPoints.length - 1] ?? 5.5,
     ]);
     setCommand("select");
     setPointerWorld(null);
@@ -705,6 +950,7 @@ export default function Home() {
     setRoofPoints(INITIAL_ROOF_POINTS);
     setRoofClosed(true);
     setWallHeights([9, 9, 9, 9]);
+    setWallThicknesses([5.5, 5.5, 5.5, 5.5]);
     setRoofBase(10);
     setClipWalls(false);
     setPitch(6);
@@ -722,6 +968,9 @@ export default function Home() {
     setOrbit({ yaw: -42, pitch: 24 });
     setFormZoom(1);
     setFormFocusOffset({ x: 0, y: 0, z: 0 });
+    setSectionBox(INITIAL_SECTION_BOX);
+    setShowSectionBox(true);
+    setSelectedSectionFace(null);
   };
 
   const updateWallHeight = (index: number, value: number) => {
@@ -1040,11 +1289,28 @@ export default function Home() {
     walls.forEach((wall) => {
       const start = project(wall.start);
       const end = project(wall.end);
+      const inward = wallInwardNormal(wall, wallPoints, wallsClosed);
+      const thickness = (wallThicknesses[wall.index] ?? 5.5) / 12;
+      const insideStart = project({
+        x: wall.start.x + inward.x * thickness,
+        z: wall.start.z + inward.z * thickness,
+      });
+      const insideEnd = project({
+        x: wall.end.x + inward.x * thickness,
+        z: wall.end.z + inward.z * thickness,
+      });
       const selected =
         selection?.kind === "wall" && selection.index === wall.index;
-      context.strokeStyle = selected ? "#171512" : "#817a71";
-      context.lineWidth = selected ? 8 : 5;
-      context.lineCap = "round";
+      drawPolygon(
+        context,
+        [start, end, insideEnd, insideStart],
+        selected ? "rgba(36, 127, 130, 0.20)" : "rgba(103, 109, 113, 0.16)",
+        selected ? "#247f82" : "#777d81",
+        selected ? 1.75 : 1,
+      );
+      context.strokeStyle = selected ? "#155f62" : "#4f5559";
+      context.lineWidth = selected ? 2.5 : 1.75;
+      context.lineCap = "butt";
       context.beginPath();
       context.moveTo(start.x, start.y);
       context.lineTo(end.x, end.y);
@@ -1064,7 +1330,7 @@ export default function Home() {
       context.font = "600 8px monospace";
       context.textAlign = "center";
       context.fillText(
-        `W${wall.index + 1} · ${feetInches(wallHeights[wall.index] ?? 9)}`,
+        `W${wall.index + 1} · ${STUD_SIZE_LABELS[wallThicknesses[wall.index] ?? 5.5]} · ${feetInches(wallHeights[wall.index] ?? 9)}`,
         wallMidpoint.x,
         wallMidpoint.y - 13,
       );
@@ -1116,8 +1382,10 @@ export default function Home() {
     roofPoints,
     selection,
     wallHeights,
+    wallThicknesses,
     wallPoints,
     walls,
+    wallsClosed,
   ]);
 
   const drawForm = useCallback(() => {
@@ -1172,8 +1440,8 @@ export default function Home() {
           (point.y - (pivotY + formFocusOffset.y)) * Math.sin(cameraPitch),
       };
     };
-    const depthSurfaces: DepthSurface[] = [];
-    const depthLines: DepthLine[] = [];
+    const modelSurfaces: ModelSurface[] = [];
+    const modelLines: ModelLine[] = [];
     const eaveMarkers: {
       point: ScreenPoint;
       selected: boolean;
@@ -1252,48 +1520,11 @@ export default function Home() {
     const dominantRoofAxisIsX =
       roofBounds.maxX - roofBounds.minX >=
       roofBounds.maxZ - roofBounds.minZ;
-    const roofSurfaceAt = (point: Point2) => {
-      if (
-        !roofClosed ||
-        roofPoints.length < 3 ||
-        (!pointInPlanPolygon(point, roofPoints) &&
-          !roofEdges.some(
-            (edge) =>
-              pointToSegmentDistance(point, edge.start, edge.end) < 0.01,
-          ))
-      ) {
-        return null;
-      }
-      const slope = pitch / 12;
-      const nearestEdge = roofEdges
-        .map((edge) => ({
-          index: edge.index,
-          distance: pointToSegmentDistance(point, edge.start, edge.end),
-        }))
-        .sort((a, b) => a.distance - b.distance)[0];
-      const localBase = nearestEdge
-        ? edgeElevation(nearestEdge.index)
-        : roofBase;
-      if (roofKind === "shed") {
-        return localBase + (point.x - roofBounds.minX) * slope;
-      }
-      if (roofKind === "gable") {
-        const run = dominantRoofAxisIsX
-          ? Math.min(
-              point.z - roofBounds.minZ,
-              roofBounds.maxZ - point.z,
-            )
-          : Math.min(
-              point.x - roofBounds.minX,
-              roofBounds.maxX - point.x,
-            );
-        return localBase + Math.max(0, run) * slope;
-      }
-      return localBase + Math.max(0, nearestEdge?.distance ?? 0) * slope;
-    };
-
     formWallRegions.current = [];
-    if (showWalls) {
+    const addWallSurfaces = (
+      displayedRoofHeightAt: (point: Point2) => number | null,
+    ) => {
+      if (!showWalls) return;
       const orderedWalls = [...walls].sort((a, b) => {
         const aMid = midpoint(a.start, a.end);
         const bMid = midpoint(b.start, b.end);
@@ -1307,37 +1538,215 @@ export default function Home() {
       });
       orderedWalls.forEach((wall) => {
         const height = wallHeights[wall.index] ?? 9;
-        const topPoints: Point3[] = [];
-        for (let sample = 12; sample >= 0; sample -= 1) {
-          const amount = sample / 12;
-          const point = {
+        const inward = wallInwardNormal(wall, wallPoints, wallsClosed);
+        const thickness = (wallThicknesses[wall.index] ?? 5.5) / 12;
+        const outsideTop: Point3[] = [];
+        const insideTop: Point3[] = [];
+        const clippedHeight = (point: Point2) => {
+          let roofHeight = clipWalls ? displayedRoofHeightAt(point) : null;
+          const underRoofBoundary =
+            pointInPlanPolygon(point, roofPoints) ||
+            roofEdges.some(
+              (edge) =>
+                pointToSegmentDistance(point, edge.start, edge.end) < 0.02,
+            );
+          if (clipWalls && roofHeight === null && underRoofBoundary) {
+            roofHeight = Math.min(
+              roofBase,
+              ...roofEdges.map((edge) => edgeElevation(edge.index)),
+            );
+          }
+          return roofHeight === null
+            ? height
+            : Math.min(height, roofHeight - 0.02);
+        };
+        for (let sample = 0; sample <= 48; sample += 1) {
+          const amount = sample / 48;
+          const outsidePoint = {
             x: wall.start.x + (wall.end.x - wall.start.x) * amount,
             z: wall.start.z + (wall.end.z - wall.start.z) * amount,
           };
-          const roofHeight = clipWalls ? roofSurfaceAt(point) : null;
-          topPoints.push({
-            x: point.x,
-            y: roofHeight === null ? height : Math.min(height, roofHeight),
-            z: point.z,
+          const insidePoint = {
+            x: outsidePoint.x + inward.x * thickness,
+            z: outsidePoint.z + inward.z * thickness,
+          };
+          outsideTop.push({
+            ...outsidePoint,
+            y: clippedHeight(outsidePoint),
+          });
+          insideTop.push({
+            ...insidePoint,
+            y: clippedHeight(insidePoint),
           });
         }
-        const face = [
+        const outsideFace = [
           { x: wall.start.x, y: 0, z: wall.start.z },
           { x: wall.end.x, y: 0, z: wall.end.z },
-          ...topPoints,
+          ...[...outsideTop].reverse(),
         ];
-        const projected = face.map(project);
+        const insideStart = {
+          x: wall.start.x + inward.x * thickness,
+          z: wall.start.z + inward.z * thickness,
+        };
+        const insideEnd = {
+          x: wall.end.x + inward.x * thickness,
+          z: wall.end.z + inward.z * thickness,
+        };
+        const insideFace = [
+          { ...insideEnd, y: 0 },
+          { ...insideStart, y: 0 },
+          ...insideTop,
+        ];
+        const topFace = [...outsideTop, ...[...insideTop].reverse()];
+        const startCap = [
+          { x: wall.start.x, y: 0, z: wall.start.z },
+          { ...insideStart, y: 0 },
+          insideTop[0],
+          outsideTop[0],
+        ];
+        const endCap = [
+          { ...insideEnd, y: 0 },
+          { x: wall.end.x, y: 0, z: wall.end.z },
+          outsideTop[outsideTop.length - 1],
+          insideTop[insideTop.length - 1],
+        ];
+        const projected = outsideFace.map(project);
         formWallRegions.current.push({ index: wall.index, points: projected });
         const selectedWall =
           selection?.kind === "wall" && selection.index === wall.index;
-        depthSurfaces.push({
-          points: face.map(depthProject),
-          fill: selectedWall ? "#d7e7e5" : "#ded9cf",
-          stroke: selectedWall ? "#16838a" : "#aaa399",
-          lineWidth: selectedWall ? 2.5 : 1,
+        [outsideFace, insideFace, topFace, startCap, endCap].forEach(
+          (points, faceIndex) => {
+            modelSurfaces.push({
+              points,
+              fill: selectedWall
+                ? faceIndex === 2
+                  ? "#a8cfcd"
+                  : "#d7e7e5"
+                : faceIndex === 2
+                  ? "#c8c3b9"
+                  : "#ded9cf",
+              stroke: selectedWall ? "#16838a" : "#aaa399",
+              lineWidth: selectedWall ? 2.2 : 0.9,
+            });
+          },
+        );
+      });
+    };
+
+    const renderClippedModel = () => {
+      const clippedSurfaces: DepthSurface[] = [];
+      const clippedLines: DepthLine[] = [];
+      modelSurfaces.forEach((surface) => {
+        const clipped = clipPolygonToSectionBox(surface.points, sectionBox);
+        if (clipped.length < 3) return;
+        clippedSurfaces.push({ ...surface, points: clipped.map(depthProject) });
+        clipped.forEach((end, index) => {
+          const start = clipped[(index + clipped.length - 1) % clipped.length];
+          if (!edgeOnSectionBoundary(start, end, sectionBox)) return;
+          clippedLines.push({
+            points: [depthProject(start), depthProject(end)],
+            stroke: "#49382e",
+            lineWidth: 2.6,
+          });
         });
       });
-    }
+      modelLines.forEach((line) => {
+        line.points.slice(1).forEach((end, index) => {
+          const clipped = clipSegmentToSectionBox(
+            line.points[index],
+            end,
+            sectionBox,
+          );
+          if (!clipped) return;
+          clippedLines.push({ ...line, points: clipped.map(depthProject) });
+        });
+      });
+      renderDepthScene(
+        context,
+        canvas,
+        width,
+        height,
+        clippedSurfaces,
+        clippedLines,
+      );
+
+      if (!showSectionBox) {
+        setSectionHandles((current) =>
+          Object.keys(current).length ? {} : current,
+        );
+        return;
+      }
+
+      const xCenter = (sectionBox.minX + sectionBox.maxX) / 2;
+      const yCenter = (sectionBox.minY + sectionBox.maxY) / 2;
+      const zCenter = (sectionBox.minZ + sectionBox.maxZ) / 2;
+      const corners: Point3[] = [
+        { x: sectionBox.minX, y: sectionBox.minY, z: sectionBox.minZ },
+        { x: sectionBox.maxX, y: sectionBox.minY, z: sectionBox.minZ },
+        { x: sectionBox.maxX, y: sectionBox.maxY, z: sectionBox.minZ },
+        { x: sectionBox.minX, y: sectionBox.maxY, z: sectionBox.minZ },
+        { x: sectionBox.minX, y: sectionBox.minY, z: sectionBox.maxZ },
+        { x: sectionBox.maxX, y: sectionBox.minY, z: sectionBox.maxZ },
+        { x: sectionBox.maxX, y: sectionBox.maxY, z: sectionBox.maxZ },
+        { x: sectionBox.minX, y: sectionBox.maxY, z: sectionBox.maxZ },
+      ];
+      const edgeIndices = [
+        [0, 1], [1, 2], [2, 3], [3, 0],
+        [4, 5], [5, 6], [6, 7], [7, 4],
+        [0, 4], [1, 5], [2, 6], [3, 7],
+      ];
+      context.save();
+      context.strokeStyle = "rgba(22, 131, 138, 0.72)";
+      context.lineWidth = 1.25;
+      context.setLineDash([5, 4]);
+      edgeIndices.forEach(([startIndex, endIndex]) => {
+        const start = project(corners[startIndex]);
+        const end = project(corners[endIndex]);
+        context.beginPath();
+        context.moveTo(start.x, start.y);
+        context.lineTo(end.x, end.y);
+        context.stroke();
+      });
+      context.restore();
+
+      const faceCenters: Record<SectionFace, Point3> = {
+        minX: { x: sectionBox.minX, y: yCenter, z: zCenter },
+        maxX: { x: sectionBox.maxX, y: yCenter, z: zCenter },
+        minY: { x: xCenter, y: sectionBox.minY, z: zCenter },
+        maxY: { x: xCenter, y: sectionBox.maxY, z: zCenter },
+        minZ: { x: xCenter, y: yCenter, z: sectionBox.minZ },
+        maxZ: { x: xCenter, y: yCenter, z: sectionBox.maxZ },
+      };
+      const nextHandles = {} as Record<
+        SectionFace,
+        ScreenPoint & { axis: ScreenPoint }
+      >;
+      (Object.keys(faceCenters) as SectionFace[]).forEach((face) => {
+        const centerPoint = faceCenters[face];
+        const projected = project(centerPoint);
+        const axisPoint = project({
+          x: centerPoint.x + (face.endsWith("X") ? 1 : 0),
+          y: centerPoint.y + (face.endsWith("Y") ? 1 : 0),
+          z: centerPoint.z + (face.endsWith("Z") ? 1 : 0),
+        });
+        nextHandles[face] = {
+          ...projected,
+          axis: {
+            x: axisPoint.x - projected.x,
+            y: axisPoint.y - projected.y,
+          },
+        };
+      });
+      setSectionHandles((current) => {
+        const unchanged = (Object.keys(nextHandles) as SectionFace[]).every(
+          (face) =>
+            current[face] &&
+            Math.abs(current[face]!.x - nextHandles[face].x) < 0.25 &&
+            Math.abs(current[face]!.y - nextHandles[face].y) < 0.25,
+        );
+        return unchanged ? current : nextHandles;
+      });
+    };
 
     if (selection?.kind === "wall") {
       const wall = walls.find((segment) => segment.index === selection.index);
@@ -1649,14 +2058,20 @@ export default function Home() {
           points: [...outerBoundary, ...definition.mainTargets],
         };
       });
+      const displayedRoofHeightAt = (point: Point2) =>
+        roofHeightFromFaces(
+          point,
+          faces.map((face) => face.points),
+        );
+      addWallSurfaces(displayedRoofHeightAt);
       faces.forEach((face) => {
           const selectedEdge =
             selection?.kind === "roof-edge" &&
             selection.index === face.index;
           const projectedFace = face.points.map(project);
           formRoofRegions.current.push(projectedFace);
-          depthSurfaces.push({
-            points: face.points.map(depthProject),
+          modelSurfaces.push({
+            points: face.points,
             fill: selectedEdge
               ? "#d97834"
               : selection?.kind === "roof"
@@ -1672,8 +2087,8 @@ export default function Home() {
         });
 
       if (showTopology && roofKind !== "shed") {
-        depthLines.push({
-          points: [depthProject(ridgeA), depthProject(ridgeB)],
+        modelLines.push({
+          points: [ridgeA, ridgeB],
           stroke: "#63371f",
           lineWidth: 1.5,
         });
@@ -1687,8 +2102,8 @@ export default function Home() {
         });
         const selectedEdge =
           selection?.kind === "roof-edge" && selection.index === edge.index;
-        depthLines.push({
-          points: points.map(depthProject),
+        modelLines.push({
+          points,
           stroke: selectedEdge ? "#16838a" : "#a95829",
           lineWidth: selectedEdge ? 4 : 2,
         });
@@ -1718,7 +2133,7 @@ export default function Home() {
             x: wall.start.x + (wall.end.x - wall.start.x) * amount,
             z: wall.start.z + (wall.end.z - wall.start.z) * amount,
           };
-          const roofHeight = roofSurfaceAt(point);
+          const roofHeight = displayedRoofHeightAt(point);
           if (roofHeight !== null && wallHeight > roofHeight + 0.01) {
             samples.push({ point, roofHeight });
           } else if (samples.length) {
@@ -1730,24 +2145,19 @@ export default function Home() {
 
         groups.forEach((group) => {
           if (group.length < 2) return;
-          depthLines.push({
-            points: group.map(({ point, roofHeight }) =>
-              depthProject({ x: point.x, y: roofHeight, z: point.z }),
-            ),
+          modelLines.push({
+            points: group.map(({ point, roofHeight }) => ({
+              x: point.x,
+              y: roofHeight,
+              z: point.z,
+            })),
             stroke: selectedWall ? "#08767e" : "#625b53",
             lineWidth: selectedWall ? 3 : 2,
           });
         });
       });
 
-      renderDepthScene(
-        context,
-        canvas,
-        width,
-        height,
-        depthSurfaces,
-        depthLines,
-      );
+      renderClippedModel();
 
       eaveMarkers.forEach(({ point, selected }) => {
         context.beginPath();
@@ -1769,14 +2179,8 @@ export default function Home() {
         );
       }
     } else {
-      renderDepthScene(
-        context,
-        canvas,
-        width,
-        height,
-        depthSurfaces,
-        depthLines,
-      );
+      addWallSurfaces(() => null);
+      renderClippedModel();
       setEaveHandlePosition((current) => (current ? null : current));
       context.fillStyle = "#a95829";
       context.font = "700 10px monospace";
@@ -1796,13 +2200,17 @@ export default function Home() {
     roofEdges,
     roofKind,
     roofPoints,
+    sectionBox,
     selection,
     showDatums,
+    showSectionBox,
     showTopology,
     showWalls,
     wallHeights,
+    wallThicknesses,
     wallPoints,
     walls,
+    wallsClosed,
   ]);
 
   useEffect(() => {
@@ -1813,7 +2221,7 @@ export default function Home() {
     draw();
     window.addEventListener("resize", draw);
     return () => window.removeEventListener("resize", draw);
-  }, [drawForm, drawPlan, viewMode]);
+  }, [drawForm, drawPlan, splitPosition, viewMode]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1854,6 +2262,7 @@ export default function Home() {
       setWallPoints((current) => [...current, point]);
       if (wallPoints.length > 0) {
         setWallHeights((current) => [...current, 9]);
+        setWallThicknesses((current) => [...current, 5.5]);
       }
       return;
     }
@@ -1918,6 +2327,70 @@ export default function Home() {
     selection?.kind === "catalog"
       ? eaveCatalog.find((condition) => condition.id === selection.id)
       : null;
+
+  const splitBounds = useCallback(() => {
+    const width = Math.max(
+      0,
+      (drawingAreaRef.current?.getBoundingClientRect().width ?? 0) -
+        SPLIT_DIVIDER_WIDTH,
+    );
+    if (width === 0) return { minimum: 0, maximum: 100 };
+    const minimumWidth = Math.min(SPLIT_MIN_PANE_WIDTH, width * 0.35);
+    const minimum = (minimumWidth / width) * 100;
+    return { minimum, maximum: 100 - minimum };
+  }, []);
+
+  const moveSplitTo = useCallback(
+    (clientX: number) => {
+      const area = drawingAreaRef.current;
+      if (!area) return;
+      const rect = area.getBoundingClientRect();
+      const availableWidth = rect.width - SPLIT_DIVIDER_WIDTH;
+      if (availableWidth <= 0) return;
+      const desiredLeftWidth =
+        clientX - rect.left - SPLIT_DIVIDER_WIDTH / 2;
+      const desiredPosition = (desiredLeftWidth / availableWidth) * 100;
+      const { minimum, maximum } = splitBounds();
+      setSplitPosition(Math.min(maximum, Math.max(minimum, desiredPosition)));
+    },
+    [splitBounds],
+  );
+
+  const handleSplitKeyDown = (
+    event: React.KeyboardEvent<HTMLDivElement>,
+  ) => {
+    const { minimum, maximum } = splitBounds();
+    const step = event.shiftKey ? 10 : 2;
+    let nextPosition = splitPosition;
+    if (event.key === "ArrowLeft") nextPosition -= step;
+    else if (event.key === "ArrowRight") nextPosition += step;
+    else if (event.key === "Home") nextPosition = minimum;
+    else if (event.key === "End") nextPosition = maximum;
+    else return;
+    event.preventDefault();
+    setSplitPosition(Math.min(maximum, Math.max(minimum, nextPosition)));
+  };
+
+  const resizeSectionFace = useCallback(
+    (face: SectionFace, value: number) => {
+      setSectionBox((current) => {
+        const minimumSize = 1;
+        const limit = face.startsWith("min")
+          ? current[`max${face.slice(3)}` as SectionFace] - minimumSize
+          : current[`min${face.slice(3)}` as SectionFace] + minimumSize;
+        const nextValue = face.startsWith("min")
+          ? Math.min(value, limit)
+          : Math.max(value, limit);
+        return { ...current, [face]: nextValue };
+      });
+    },
+    [],
+  );
+
+  const sectionFaceLabel = (face: SectionFace) => {
+    const side = face.startsWith("min") ? "minimum" : "maximum";
+    return `${side} ${face.slice(-1).toUpperCase()} section face`;
+  };
 
   return (
     <main className="studio-shell">
@@ -2020,32 +2493,41 @@ export default function Home() {
 
           <div className="control-section">
             <ControlHeading number="02" title="Roof volume" />
-            <div className="compact-form-options">
-              {(Object.keys(ROOF_FORMS) as RoofKind[]).map((kind) => (
-                <button
-                  key={kind}
-                  className={roofKind === kind ? "active" : ""}
-                  onClick={() => setRoofKind(kind)}
+            <div className="compact-select-grid">
+              <label className="compact-select-control">
+                <span>Form</span>
+                <select
+                  value={roofKind}
+                  onChange={(event) => setRoofKind(event.target.value as RoofKind)}
                 >
-                  <strong>{ROOF_FORMS[kind].label}</strong>
-                  <small>{ROOF_FORMS[kind].description}</small>
-                </button>
-              ))}
+                  {(Object.keys(ROOF_FORMS) as RoofKind[]).map((kind) => (
+                    <option key={kind} value={kind}>
+                      {ROOF_FORMS[kind].label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="compact-select-control">
+                <span>Structure</span>
+                <select
+                  value={roofSystemType}
+                  onChange={(event) =>
+                    changeRoofSystem(event.target.value as RoofSystemType)
+                  }
+                >
+                  {(Object.keys(SYSTEM_LABELS) as RoofSystemType[]).map(
+                    (systemType) => (
+                      <option key={systemType} value={systemType}>
+                        {SYSTEM_LABELS[systemType]}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </label>
             </div>
-            <div className="roof-system-field">
-              <span>Structural system</span>
-              <div className="roof-system-options">
-                {(Object.keys(SYSTEM_LABELS) as RoofSystemType[]).map((systemType) => (
-                  <button
-                    key={systemType}
-                    className={roofSystemType === systemType ? "active" : ""}
-                    onClick={() => changeRoofSystem(systemType)}
-                  >
-                    {SYSTEM_LABELS[systemType]}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <p className="roof-form-description">
+              {ROOF_FORMS[roofKind].description}
+            </p>
             <Range
               label="Roof base elevation"
               value={roofBase}
@@ -2128,7 +2610,17 @@ export default function Home() {
           </div>
         </aside>
 
-        <section className={`drawing-area ${viewMode}-view`}>
+        <section
+          ref={drawingAreaRef}
+          className={`drawing-area ${viewMode}-view${isResizingSplit ? " resizing" : ""}`}
+          style={
+            viewMode === "split"
+              ? {
+                  gridTemplateColumns: `${splitPosition}fr ${SPLIT_DIVIDER_WIDTH}px ${100 - splitPosition}fr`,
+                }
+              : undefined
+          }
+        >
           {viewMode !== "form" && (
             <ViewPanel
               className="plan-panel"
@@ -2166,6 +2658,50 @@ export default function Home() {
                     : "Select a wall or roof edge to edit"}
               </div>
             </ViewPanel>
+          )}
+
+          {viewMode === "split" && (
+            <div
+              className="split-divider"
+              role="separator"
+              aria-label="Resize 2D and 3D workspaces"
+              aria-orientation="vertical"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(splitPosition)}
+              aria-valuetext={`${Math.round(splitPosition)}% 2D, ${Math.round(100 - splitPosition)}% 3D`}
+              tabIndex={0}
+              onKeyDown={handleSplitKeyDown}
+              onDoubleClick={() => setSplitPosition(50)}
+              onPointerDown={(event) => {
+                if (event.button !== 0) return;
+                event.preventDefault();
+                event.currentTarget.focus();
+                event.currentTarget.setPointerCapture(event.pointerId);
+                splitDrag.current = { pointerId: event.pointerId };
+                setIsResizingSplit(true);
+                moveSplitTo(event.clientX);
+              }}
+              onPointerMove={(event) => {
+                if (splitDrag.current?.pointerId !== event.pointerId) return;
+                moveSplitTo(event.clientX);
+              }}
+              onPointerUp={(event) => {
+                if (splitDrag.current?.pointerId !== event.pointerId) return;
+                splitDrag.current = null;
+                setIsResizingSplit(false);
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                  event.currentTarget.releasePointerCapture(event.pointerId);
+                }
+              }}
+              onPointerCancel={(event) => {
+                if (splitDrag.current?.pointerId !== event.pointerId) return;
+                splitDrag.current = null;
+                setIsResizingSplit(false);
+              }}
+            >
+              <span className="split-divider-handle" aria-hidden="true" />
+            </div>
           )}
 
           {viewMode !== "plan" && (
@@ -2344,6 +2880,83 @@ export default function Home() {
               <div className="orientation">
                 {Math.round(((orbit.yaw % 360) + 360) % 360)}°
               </div>
+              {showSectionBox &&
+                (Object.keys(sectionHandles) as SectionFace[]).map((face) => {
+                  const position = sectionHandles[face];
+                  if (!position) return null;
+                  return (
+                    <button
+                      key={face}
+                      className={`section-face-handle${selectedSectionFace === face ? " active" : ""}`}
+                      style={{ left: position.x, top: position.y }}
+                      aria-label={`${sectionFaceLabel(face)}, ${feetInches(sectionBox[face])}`}
+                      onClick={(event) => event.stopPropagation()}
+                      onKeyDown={(event) => {
+                        if (!["ArrowUp", "ArrowRight", "ArrowDown", "ArrowLeft"].includes(event.key)) return;
+                        event.preventDefault();
+                        const outward = event.key === "ArrowUp" || event.key === "ArrowRight" ? 1 : -1;
+                        const faceDirection = face.startsWith("min") ? -1 : 1;
+                        resizeSectionFace(
+                          face,
+                          sectionBox[face] + outward * faceDirection * (event.shiftKey ? 2 : 0.5),
+                        );
+                      }}
+                      onPointerDown={(event) => {
+                        if (event.button !== 0) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        setSelectedSectionFace(face);
+                        sectionDrag.current = {
+                          pointerId: event.pointerId,
+                          face,
+                          startX: event.clientX,
+                          startY: event.clientY,
+                          startValue: sectionBox[face],
+                          screenAxis: position.axis,
+                        };
+                      }}
+                      onPointerMove={(event) => {
+                        const drag = sectionDrag.current;
+                        if (!drag || drag.pointerId !== event.pointerId) return;
+                        const lengthSquared =
+                          drag.screenAxis.x * drag.screenAxis.x +
+                          drag.screenAxis.y * drag.screenAxis.y;
+                        if (lengthSquared < 0.01) return;
+                        const delta =
+                          ((event.clientX - drag.startX) * drag.screenAxis.x +
+                            (event.clientY - drag.startY) * drag.screenAxis.y) /
+                          lengthSquared;
+                        resizeSectionFace(face, drag.startValue + delta);
+                      }}
+                      onPointerUp={(event) => {
+                        if (sectionDrag.current?.pointerId !== event.pointerId) return;
+                        sectionDrag.current = null;
+                        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                          event.currentTarget.releasePointerCapture(event.pointerId);
+                        }
+                      }}
+                      onPointerCancel={() => {
+                        sectionDrag.current = null;
+                      }}
+                    >
+                      <span aria-hidden="true">
+                        {face.endsWith("Y") ? "↕" : "↔"}
+                      </span>
+                    </button>
+                  );
+                })}
+              <button
+                className={`section-box-toggle${showSectionBox ? " active" : ""}`}
+                aria-pressed={showSectionBox}
+                onClick={() => {
+                  setShowSectionBox((current) => !current);
+                  setSelectedSectionFace(null);
+                }}
+              >
+                <span aria-hidden="true" />
+                Section box
+              </button>
               {selection?.kind === "wall" && wallHandlePosition && (
                 <button
                   className="wall-height-handle"
@@ -2493,15 +3106,43 @@ export default function Home() {
                     <span>ft</span>
                   </div>
                 </label>
+                <fieldset className="stud-size-field">
+                  <legend>Nominal stud thickness</legend>
+                  <div>
+                    {([3.5, 5.5, 11.25] as StudSize[]).map((size) => (
+                      <button
+                        type="button"
+                        key={size}
+                        aria-pressed={
+                          (wallThicknesses[selection.index] ?? 5.5) === size
+                        }
+                        onClick={() =>
+                          setWallThicknesses((current) =>
+                            current.map((thickness, index) =>
+                              index === selection.index ? size : thickness,
+                            ),
+                          )
+                        }
+                      >
+                        <strong>{STUD_SIZE_LABELS[size]}</strong>
+                        <small>{size}″</small>
+                      </button>
+                    ))}
+                  </div>
+                </fieldset>
               </div>
               <div className="detail-inspector-note">
-                This plate height is independently authored. Changing it never
-                repositions the roof.
+                The authored path remains the outside face. Stud depth grows
+                inward and never repositions the roof.
               </div>
               <dl className="inspector-data">
                 <div>
                   <dt>Roof clipping</dt>
                   <dd>{clipWalls ? "Displayed wall clips at roof" : "Off"}</dd>
+                </div>
+                <div>
+                  <dt>Outside alignment</dt>
+                  <dd>Fixed to authored path</dd>
                 </div>
               </dl>
             </>
