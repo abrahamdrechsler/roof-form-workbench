@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   DEFAULT_EAVE_PARAMETERS,
   EaveDetailEditor,
@@ -20,6 +20,7 @@ type EaveDriver = "heel" | "seat";
 type Point2 = { x: number; z: number };
 type Point3 = { x: number; y: number; z: number };
 type ScreenPoint = { x: number; y: number };
+type IndexedPlanSegment = { start: Point2; end: Point2; index: number };
 
 const SPLIT_DIVIDER_WIDTH = 9;
 const SPLIT_MIN_PANE_WIDTH = 220;
@@ -66,7 +67,7 @@ type EaveCondition = {
   inset: number;
 };
 type EdgeRelationship = {
-  conditionId: string;
+  conditionIds: string[];
   elevationOffset: number;
 };
 type Room = { id: string; name: string };
@@ -121,6 +122,7 @@ const STUD_SIZE_LABELS: Record<StudSize, string> = {
 const PRIMARY_ROOM: Room = { id: "room-1", name: "Room 1" };
 const CEILING_FRAMING_THICKNESS_INCHES = 3.5;
 const CEILING_FINISH_THICKNESS_INCHES = 0.5;
+const DEFAULT_BEARING_ELEVATION_FEET = 9;
 const DEFAULT_ROOF_ASSEMBLY: RoofAssembly = {
   structuralDepthInches: 5.5,
   buildUpThicknessInches: 0.6,
@@ -164,6 +166,26 @@ const INITIAL_EAVE_CONDITIONS: EaveCondition[] = [
     inset: 0,
   },
 ];
+
+function defaultConditionIdsBySystem(catalog: EaveCondition[]) {
+  const assignedSystems = new Set<RoofSystemType>();
+  return catalog.flatMap((condition) => {
+    if (assignedSystems.has(condition.systemType)) return [];
+    assignedSystems.add(condition.systemType);
+    return [condition.id];
+  });
+}
+
+function activeConditionForRelationship(
+  relationship: EdgeRelationship | undefined,
+  catalog: EaveCondition[],
+  systemType: RoofSystemType,
+) {
+  if (!relationship) return undefined;
+  return relationship.conditionIds
+    .map((id) => catalog.find((condition) => condition.id === id))
+    .find((condition) => condition?.systemType === systemType);
+}
 
 const ROOF_FORMS: Record<RoofKind, { label: string; description: string }> = {
   hip: {
@@ -219,6 +241,75 @@ function pointToSegmentDistance(point: Point2, start: Point2, end: Point2) {
     point.x - (start.x + amount * deltaX),
     point.z - (start.z + amount * deltaZ),
   );
+}
+
+function clipPlanPolygonToConvexBoundary(
+  polygon: Point2[],
+  boundary: Point2[],
+) {
+  if (polygon.length < 3 || boundary.length < 3) return [];
+  const signedArea = boundary.reduce((area, point, index) => {
+    const next = boundary[(index + 1) % boundary.length];
+    return area + point.x * next.z - next.x * point.z;
+  }, 0);
+  const orientation = signedArea >= 0 ? 1 : -1;
+  return boundary.reduce<Point2[]>((clipped, edgeStart, edgeIndex) => {
+    if (clipped.length < 3) return [];
+    const edgeEnd = boundary[(edgeIndex + 1) % boundary.length];
+    const edgeX = edgeEnd.x - edgeStart.x;
+    const edgeZ = edgeEnd.z - edgeStart.z;
+    const side = (point: Point2) =>
+      orientation *
+      (edgeX * (point.z - edgeStart.z) -
+        edgeZ * (point.x - edgeStart.x));
+    const result: Point2[] = [];
+    clipped.forEach((current, index) => {
+      const previous = clipped[(index + clipped.length - 1) % clipped.length];
+      const currentSide = side(current);
+      const previousSide = side(previous);
+      const currentInside = currentSide >= -0.0001;
+      const previousInside = previousSide >= -0.0001;
+      if (currentInside !== previousInside) {
+        const denominator = previousSide - currentSide;
+        const amount =
+          Math.abs(denominator) < 0.00001
+            ? 0
+            : previousSide / denominator;
+        result.push({
+          x: previous.x + (current.x - previous.x) * amount,
+          z: previous.z + (current.z - previous.z) * amount,
+        });
+      }
+      if (currentInside) result.push(current);
+    });
+    return result;
+  }, polygon);
+}
+
+function wallUnderRoofEdge(
+  edge: IndexedPlanSegment,
+  walls: IndexedPlanSegment[],
+) {
+  const edgeLength = Math.max(0.0001, segmentLength(edge.start, edge.end));
+  const edgeDirection = {
+    x: (edge.end.x - edge.start.x) / edgeLength,
+    z: (edge.end.z - edge.start.z) / edgeLength,
+  };
+  const parallelWalls = walls.filter((wall) => {
+    const wallLength = Math.max(0.0001, segmentLength(wall.start, wall.end));
+    const alignment = Math.abs(
+      edgeDirection.x * ((wall.end.x - wall.start.x) / wallLength) +
+        edgeDirection.z * ((wall.end.z - wall.start.z) / wallLength),
+    );
+    return alignment > 0.98;
+  });
+  const candidates = parallelWalls.length > 0 ? parallelWalls : walls;
+  const edgeMidpoint = midpoint(edge.start, edge.end);
+  return [...candidates].sort(
+    (first, second) =>
+      pointToSegmentDistance(edgeMidpoint, first.start, first.end) -
+      pointToSegmentDistance(edgeMidpoint, second.start, second.end),
+  )[0];
 }
 
 function prepareCanvas(canvas: HTMLCanvasElement) {
@@ -388,51 +479,6 @@ function roofHeightFromFaces(point: Point2, faces: Point3[][]) {
     });
   });
   return heights.length ? Math.min(...heights) : null;
-}
-
-function roofFacePlaneHeight(point: Point2, face: Point3[]) {
-  if (face.length < 3) return null;
-  const normal = roofFaceNormal(face);
-  if (Math.abs(normal.y) < 0.00001) return null;
-  const anchor = face[0];
-  return (
-    anchor.y -
-    (normal.x * (point.x - anchor.x) +
-      normal.z * (point.z - anchor.z)) /
-      normal.y
-  );
-}
-
-function clipPlanPolygonAboveRoofPlanes(
-  polygon: Point2[],
-  faces: Point3[][],
-  minimumHeight: number,
-) {
-  return faces.reduce<Point2[]>((clipped, face) => {
-    if (clipped.length < 3) return [];
-    const result: Point2[] = [];
-    clipped.forEach((current, index) => {
-      const previous = clipped[(index + clipped.length - 1) % clipped.length];
-      const currentHeight = roofFacePlaneHeight(current, face);
-      const previousHeight = roofFacePlaneHeight(previous, face);
-      if (currentHeight === null || previousHeight === null) return;
-      const currentInside = currentHeight >= minimumHeight - 0.0001;
-      const previousInside = previousHeight >= minimumHeight - 0.0001;
-      if (currentInside !== previousInside) {
-        const denominator = currentHeight - previousHeight;
-        const amount =
-          Math.abs(denominator) < 0.00001
-            ? 0
-            : (minimumHeight - previousHeight) / denominator;
-        result.push({
-          x: previous.x + (current.x - previous.x) * amount,
-          z: previous.z + (current.z - previous.z) * amount,
-        });
-      }
-      if (currentInside) result.push(current);
-    });
-    return result;
-  }, polygon);
 }
 
 function clipPlanPolygonByHeight(
@@ -1039,7 +1085,7 @@ export default function Home() {
   const [wallThicknesses, setWallThicknesses] = useState<StudSize[]>([
     5.5, 5.5, 5.5, 5.5,
   ]);
-  const [roofBase, setRoofBase] = useState(10);
+  const [roofBase, setRoofBase] = useState(DEFAULT_BEARING_ELEVATION_FEET);
   const [clipWalls, setClipWalls] = useState(false);
   const [pitch, setPitch] = useState(6);
   const [roofKind, setRoofKind] = useState<RoofKind>("hip");
@@ -1087,7 +1133,7 @@ export default function Home() {
   );
   const [relationships, setRelationships] = useState<EdgeRelationship[]>(
     INITIAL_ROOF_POINTS.map(() => ({
-      conditionId: "rafter-seat",
+      conditionIds: defaultConditionIdsBySystem(INITIAL_EAVE_CONDITIONS),
       elevationOffset: 0,
     })),
   );
@@ -1168,18 +1214,28 @@ export default function Home() {
     wallsClosed,
   );
   const roofEdges = roofSegments(roofPoints, roofClosed);
-  const center = modelCenter(wallPoints, roofPoints);
-  const compatibleEaveDetails = eaveCatalog.filter(
-    (condition) => condition.systemType === roofSystemType,
+  const structuralCeilingFootprint = useMemo(
+    () =>
+      roofClosed
+        ? clipPlanPolygonToConvexBoundary(wallPoints, roofPoints)
+        : [],
+    [roofClosed, roofPoints, wallPoints],
   );
-
+  const finishCeilingFootprint = useMemo(
+    () =>
+      roofClosed
+        ? clipPlanPolygonToConvexBoundary(roomInteriorPoints, roofPoints)
+        : [],
+    [roofClosed, roofPoints, roomInteriorPoints],
+  );
+  const center = modelCenter(wallPoints, roofPoints);
   const conditionForEdge = useCallback(
     (index: number) =>
-      eaveCatalog.find(
-        (condition) =>
-          condition.id === relationships[index]?.conditionId &&
-          condition.systemType === roofSystemType,
-      ) ?? eaveCatalog.find((condition) => condition.systemType === roofSystemType),
+      activeConditionForRelationship(
+        relationships[index],
+        eaveCatalog,
+        roofSystemType,
+      ),
     [eaveCatalog, relationships, roofSystemType],
   );
 
@@ -1187,6 +1243,35 @@ export default function Home() {
     (index: number) => roofBase + (relationships[index]?.elevationOffset ?? 0),
     [relationships, roofBase],
   );
+
+  const derivedSupportForWall = useCallback(
+    (wallIndex: number) => {
+      const wall = walls[wallIndex];
+      if (!wall) return undefined;
+      const matchingEdges = roofEdges.filter(
+        (edge) => wallUnderRoofEdge(edge, walls)?.index === wallIndex,
+      );
+      const edge = matchingEdges.sort(
+        (first, second) =>
+          edgeElevation(second.index) - edgeElevation(first.index),
+      )[0];
+      const authoredTop = wallHeights[wallIndex] ?? 9;
+      const bearingElevation = edge ? edgeElevation(edge.index) : authoredTop;
+      if (!edge || bearingElevation <= authoredTop + 0.001) return undefined;
+      return {
+        wallIndex,
+        edgeIndex: edge.index,
+        authoredTop,
+        bearingElevation,
+      };
+    },
+    [edgeElevation, roofEdges, wallHeights, walls],
+  );
+
+  const derivedRoofSupports = walls.flatMap((wall) => {
+    const support = derivedSupportForWall(wall.index);
+    return support ? [support] : [];
+  });
 
   const updateRoofAssembly = (changes: Partial<RoofAssembly>) => {
     if (changes.structuralDepthInches !== undefined) {
@@ -1247,9 +1332,9 @@ export default function Home() {
 
   const closeRoof = () => {
     if (roofPoints.length < 3) return;
-    const fallbackId = compatibleEaveDetails[0]?.id ?? "";
+    const defaultConditionIds = defaultConditionIdsBySystem(eaveCatalog);
     const nextRelationships = roofPoints.map(() => ({
-      conditionId: fallbackId,
+      conditionIds: defaultConditionIds,
       elevationOffset: 0,
     }));
     setRelationships(nextRelationships);
@@ -1265,7 +1350,7 @@ export default function Home() {
     setRoofClosed(true);
     setWallHeights([9, 9, 9, 9]);
     setWallThicknesses([5.5, 5.5, 5.5, 5.5]);
-    setRoofBase(10);
+    setRoofBase(DEFAULT_BEARING_ELEVATION_FEET);
     setClipWalls(false);
     setPitch(6);
     setRoofKind("hip");
@@ -1282,7 +1367,7 @@ export default function Home() {
     setShowCeiling(true);
     setRelationships(
       INITIAL_ROOF_POINTS.map(() => ({
-        conditionId: "rafter-seat",
+        conditionIds: defaultConditionIdsBySystem(INITIAL_EAVE_CONDITIONS),
         elevationOffset: 0,
       })),
     );
@@ -1311,20 +1396,6 @@ export default function Home() {
     edgeIndex: number,
     changes: Partial<EdgeRelationship>,
   ) => {
-    if (changes.conditionId !== undefined) {
-      const previous = eaveCatalog.find(
-        (condition) => condition.id === relationships[edgeIndex]?.conditionId,
-      );
-      const next = eaveCatalog.find(
-        (condition) => condition.id === changes.conditionId,
-      );
-      if (previous !== undefined && next !== undefined) {
-        const delta = (next.parameters.overhang - previous.parameters.overhang) / 12;
-        setRoofPoints((current) =>
-          shiftRoofEdgesByOverhang(current, [{ edgeIndex, delta }]),
-        );
-      }
-    }
     setRelationships((current) =>
       current.map((relationship, index) =>
         index === edgeIndex
@@ -1334,40 +1405,66 @@ export default function Home() {
     );
   };
 
-  const changeRoofSystem = (systemType: RoofSystemType) => {
-    const fallback = eaveCatalog.find(
-      (condition) => condition.systemType === systemType,
+  const assignConditionToEdge = (edgeIndex: number, conditionId: string) => {
+    const nextCondition = eaveCatalog.find(
+      (condition) => condition.id === conditionId,
     );
-    if (fallback === undefined) {
-      return;
-    }
-    const overhangChanges = relationships.flatMap((relationship, edgeIndex) => {
-      const currentDetail = eaveCatalog.find(
-        (condition) => condition.id === relationship.conditionId,
+    if (!nextCondition) return;
+    const previousCondition = conditionForEdge(edgeIndex);
+    if (
+      nextCondition.systemType === roofSystemType &&
+      previousCondition !== undefined &&
+      previousCondition.id !== nextCondition.id
+    ) {
+      const delta =
+        (nextCondition.parameters.overhang -
+          previousCondition.parameters.overhang) /
+        12;
+      setRoofPoints((current) =>
+        shiftRoofEdgesByOverhang(current, [{ edgeIndex, delta }]),
       );
-      if (currentDetail === undefined || currentDetail.systemType === systemType) {
+    }
+    setRelationships((current) =>
+      current.map((relationship, index) => {
+        if (index !== edgeIndex) return relationship;
+        const conditionIds = relationship.conditionIds.filter((id) => {
+          const assigned = eaveCatalog.find((condition) => condition.id === id);
+          return assigned?.systemType !== nextCondition.systemType;
+        });
+        return {
+          ...relationship,
+          conditionIds: [...conditionIds, nextCondition.id],
+        };
+      }),
+    );
+  };
+
+  const changeRoofSystem = (systemType: RoofSystemType) => {
+    const overhangChanges = relationships.flatMap((relationship, edgeIndex) => {
+      const currentDetail = activeConditionForRelationship(
+        relationship,
+        eaveCatalog,
+        roofSystemType,
+      );
+      const nextDetail = activeConditionForRelationship(
+        relationship,
+        eaveCatalog,
+        systemType,
+      );
+      if (currentDetail === undefined || nextDetail === undefined) {
         return [];
       }
       return [{
         edgeIndex,
         delta:
-          (fallback.parameters.overhang - currentDetail.parameters.overhang) / 12,
+          (nextDetail.parameters.overhang - currentDetail.parameters.overhang) /
+          12,
       }];
     });
     setRoofPoints((current) =>
       shiftRoofEdgesByOverhang(current, overhangChanges),
     );
     setRoofSystemType(systemType);
-    setRelationships((current) =>
-      current.map((relationship) => {
-        const currentDetail = eaveCatalog.find(
-          (condition) => condition.id === relationship.conditionId,
-        );
-        return currentDetail?.systemType === systemType
-          ? relationship
-          : { ...relationship, conditionId: fallback.id };
-      }),
-    );
   };
 
   const openCatalog = (condition: EaveCondition) => {
@@ -1408,6 +1505,9 @@ export default function Home() {
     const id = detailEditor.id ?? `eave-${Date.now()}`;
     const parameters = {
       ...detailEditor.draft.parameters,
+      // The detail lab is a fixed 6:12 graphic. The main roof-volume pitch is
+      // the only slope control that can drive the 3D roof.
+      pitch: DEFAULT_EAVE_PARAMETERS.pitch,
       // Conditions own the eave profile, but not the depth of the roof they
       // are assigned to. Saving cannot introduce a conflicting member depth.
       rafterDepth: roofAssembly.structuralDepthInches,
@@ -1430,54 +1530,66 @@ export default function Home() {
           ? parameters.seatCut / 12
           : 0,
     };
+    const nextCatalog = detailEditor.id === null
+      ? [...eaveCatalog, condition]
+      : eaveCatalog.map((item) => item.id === condition.id ? condition : item);
+    let nextRelationships = relationships;
     if (detailEditor.id !== null) {
       const previous = eaveCatalog.find((item) => item.id === detailEditor.id);
       if (previous !== undefined) {
-        const replacement =
-          condition.systemType === roofSystemType
-            ? condition
-            : eaveCatalog.find(
-                (item) =>
-                  item.id !== detailEditor.id &&
-                  item.systemType === roofSystemType,
-              );
-        const delta = replacement === undefined
-          ? 0
-          : (replacement.parameters.overhang - previous.parameters.overhang) / 12;
-        const subscribedEdges = relationships.flatMap((relationship, edgeIndex) =>
-          relationship.conditionId === detailEditor.id
-            ? [{ edgeIndex, delta }]
-            : [],
+        const previousTypeFallback = eaveCatalog.find(
+          (item) =>
+            item.id !== detailEditor.id &&
+            item.systemType === previous.systemType,
         );
+        nextRelationships = relationships.map((relationship) => {
+          if (!relationship.conditionIds.includes(detailEditor.id!)) {
+            return relationship;
+          }
+          const conditionIds = relationship.conditionIds.filter((assignedId) => {
+            if (assignedId === detailEditor.id) return true;
+            const assigned = eaveCatalog.find((item) => item.id === assignedId);
+            return assigned?.systemType !== condition.systemType;
+          });
+          if (
+            previous.systemType !== condition.systemType &&
+            previousTypeFallback !== undefined &&
+            !conditionIds.some((assignedId) =>
+              eaveCatalog.find((item) => item.id === assignedId)?.systemType ===
+              previous.systemType,
+            )
+          ) {
+            conditionIds.push(previousTypeFallback.id);
+          }
+          return { ...relationship, conditionIds: [...new Set(conditionIds)] };
+        });
+        const overhangChanges = relationships.flatMap((relationship, edgeIndex) => {
+          const previousActive = activeConditionForRelationship(
+            relationship,
+            eaveCatalog,
+            roofSystemType,
+          );
+          const nextActive = activeConditionForRelationship(
+            nextRelationships[edgeIndex],
+            nextCatalog,
+            roofSystemType,
+          );
+          if (!previousActive || !nextActive) return [];
+          return [{
+            edgeIndex,
+            delta:
+              (nextActive.parameters.overhang -
+                previousActive.parameters.overhang) /
+              12,
+          }];
+        });
         setRoofPoints((current) =>
-          shiftRoofEdgesByOverhang(current, subscribedEdges),
+          shiftRoofEdgesByOverhang(current, overhangChanges),
         );
       }
     }
-    setEaveCatalog((current) => {
-      if (detailEditor.id === null) {
-        return [...current, condition];
-      }
-      return current.map((item) => item.id === condition.id ? condition : item);
-    });
-    if (detailEditor.id !== null) {
-      setRelationships((current) =>
-        current.map((relationship) =>
-          relationship.conditionId === detailEditor.id &&
-          condition.systemType !== roofSystemType
-            ? {
-                ...relationship,
-                conditionId:
-                  eaveCatalog.find(
-                    (item) =>
-                      item.id !== detailEditor.id &&
-                      item.systemType === roofSystemType,
-                  )?.id ?? "",
-              }
-            : relationship,
-        ),
-      );
-    }
+    setEaveCatalog(nextCatalog);
+    setRelationships(nextRelationships);
     setSelection({ kind: "catalog", id });
     setCatalogDraft({
       name: condition.name,
@@ -1497,26 +1609,41 @@ export default function Home() {
         condition.systemType === selected.systemType,
     );
     if (!fallback) return;
-    const selectedOverhang = selected.parameters.overhang;
-    const replacementOverhang = fallback.parameters.overhang;
-    const overhangChanges = relationships.flatMap((relationship, edgeIndex) =>
-      relationship.conditionId === selection.id
-        ? [{ edgeIndex, delta: (replacementOverhang - selectedOverhang) / 12 }]
-        : [],
+    const nextCatalog = eaveCatalog.filter(
+      (condition) => condition.id !== selection.id,
     );
+    const nextRelationships = relationships.map((relationship) => ({
+      ...relationship,
+      conditionIds: relationship.conditionIds.includes(selection.id)
+        ? relationship.conditionIds.map((id) =>
+            id === selection.id ? fallback.id : id,
+          )
+        : relationship.conditionIds,
+    }));
+    const overhangChanges = relationships.flatMap((relationship, edgeIndex) => {
+      const previousActive = activeConditionForRelationship(
+        relationship,
+        eaveCatalog,
+        roofSystemType,
+      );
+      const nextActive = activeConditionForRelationship(
+        nextRelationships[edgeIndex],
+        nextCatalog,
+        roofSystemType,
+      );
+      if (!previousActive || !nextActive) return [];
+      return [{
+        edgeIndex,
+        delta:
+          (nextActive.parameters.overhang - previousActive.parameters.overhang) /
+          12,
+      }];
+    });
     setRoofPoints((current) =>
       shiftRoofEdgesByOverhang(current, overhangChanges),
     );
-    setRelationships((current) =>
-      current.map((relationship) =>
-        relationship.conditionId === selection.id
-          ? { ...relationship, conditionId: fallback.id }
-          : relationship,
-      ),
-    );
-    setEaveCatalog((current) =>
-      current.filter((condition) => condition.id !== selection.id),
-    );
+    setRelationships(nextRelationships);
+    setEaveCatalog(nextCatalog);
     setSelection(null);
   };
 
@@ -1561,26 +1688,29 @@ export default function Home() {
       context.stroke();
     }
 
-    if (showCeiling && roomInteriorPoints.length >= 3) {
+    if (showCeiling && structuralCeilingFootprint.length >= 3) {
       const selected = selection?.kind === "ceiling";
       drawPolygon(
         context,
-        wallPoints.map(project),
+        structuralCeilingFootprint.map(project),
         selected ? "rgba(38, 127, 103, 0.13)" : "rgba(38, 127, 103, 0.05)",
         selected ? "#175c4c" : "rgba(23, 92, 76, 0.38)",
         selected ? 2.5 : 1,
       );
       drawPolygon(
         context,
-        roomInteriorPoints.map(project),
+        finishCeilingFootprint.map(project),
         selected ? "rgba(238, 232, 221, 0.38)" : "rgba(238, 232, 221, 0.15)",
         selected ? "#766e63" : "rgba(118, 110, 99, 0.45)",
         selected ? 1.75 : 0.9,
       );
-      const roomCenter = roomInteriorPoints.reduce(
+      const labelFootprint = finishCeilingFootprint.length >= 3
+        ? finishCeilingFootprint
+        : structuralCeilingFootprint;
+      const roomCenter = labelFootprint.reduce(
         (result, point) => ({
-          x: result.x + point.x / roomInteriorPoints.length,
-          z: result.z + point.z / roomInteriorPoints.length,
+          x: result.x + point.x / labelFootprint.length,
+          z: result.z + point.z / labelFootprint.length,
         }),
         { x: 0, z: 0 },
       );
@@ -1679,6 +1809,18 @@ export default function Home() {
       context.moveTo(start.x, start.y);
       context.lineTo(end.x, end.y);
       context.stroke();
+      const support = derivedSupportForWall(wall.index);
+      if (support) {
+        context.save();
+        context.setLineDash([5, 4]);
+        context.strokeStyle = "#16838a";
+        context.lineWidth = 2.25;
+        context.beginPath();
+        context.moveTo(insideStart.x, insideStart.y);
+        context.lineTo(insideEnd.x, insideEnd.y);
+        context.stroke();
+        context.restore();
+      }
       const wallMidpoint = {
         x: (start.x + end.x) / 2,
         y: (start.y + end.y) / 2,
@@ -1694,7 +1836,7 @@ export default function Home() {
       context.font = "600 8px monospace";
       context.textAlign = "center";
       context.fillText(
-        `W${wall.index + 1} · ${STUD_SIZE_LABELS[wallThicknesses[wall.index] ?? 5.5]} · ${feetInches(wallHeights[wall.index] ?? 9)}`,
+        `W${wall.index + 1} · ${STUD_SIZE_LABELS[wallThicknesses[wall.index] ?? 5.5]} · ${feetInches(wallHeights[wall.index] ?? 9)}${support ? " · ROOF SUPPORT" : ""}`,
         wallMidpoint.x,
         wallMidpoint.y - 13,
       );
@@ -1741,13 +1883,15 @@ export default function Home() {
   }, [
     command,
     ceiling.bottomOfFramingElevationFeet,
+    derivedSupportForWall,
+    finishCeilingFootprint,
     pointerWorld,
     roofClosed,
     roofEdges,
     roofPoints,
-    roomInteriorPoints,
     selection,
     showCeiling,
+    structuralCeilingFootprint,
     wallHeights,
     wallThicknesses,
     wallPoints,
@@ -1871,23 +2015,6 @@ export default function Home() {
       context.stroke();
     }
 
-    const roofBounds = roofPoints.reduce(
-      (result, point) => ({
-        minX: Math.min(result.minX, point.x),
-        maxX: Math.max(result.maxX, point.x),
-        minZ: Math.min(result.minZ, point.z),
-        maxZ: Math.max(result.maxZ, point.z),
-      }),
-      {
-        minX: Number.POSITIVE_INFINITY,
-        maxX: Number.NEGATIVE_INFINITY,
-        minZ: Number.POSITIVE_INFINITY,
-        maxZ: Number.NEGATIVE_INFINITY,
-      },
-    );
-    const dominantRoofAxisIsX =
-      roofBounds.maxX - roofBounds.minX >=
-      roofBounds.maxZ - roofBounds.minZ;
     formWallRegions.current = [];
     const addWallSurfaces = (
       displayedRoofHeightAt: (point: Point2) => number | null,
@@ -2009,16 +2136,83 @@ export default function Home() {
       });
     };
 
+    const addDerivedRoofSupportSurfaces = (
+      roofUndersideAt: (point: Point2) => number | null,
+    ) => {
+      if (!showWalls) return;
+      walls.forEach((wall) => {
+        const support = derivedSupportForWall(wall.index);
+        if (!support) return;
+        const inward = wallInwardNormal(wall, wallPoints, wallsClosed);
+        const thickness = (wallThicknesses[wall.index] ?? 5.5) / 12;
+        const outsideBottom: Point3[] = [];
+        const insideBottom: Point3[] = [];
+        const outsideTop: Point3[] = [];
+        const insideTop: Point3[] = [];
+        for (let sample = 0; sample <= 48; sample += 1) {
+          const amount = sample / 48;
+          const outsidePoint = {
+            x: wall.start.x + (wall.end.x - wall.start.x) * amount,
+            z: wall.start.z + (wall.end.z - wall.start.z) * amount,
+          };
+          const insidePoint = {
+            x: outsidePoint.x + inward.x * thickness,
+            z: outsidePoint.z + inward.z * thickness,
+          };
+          const supportTopAt = (point: Point2) =>
+            Math.max(
+              support.authoredTop,
+              roofUndersideAt(point) ?? support.bearingElevation,
+            );
+          outsideBottom.push({ ...outsidePoint, y: support.authoredTop });
+          insideBottom.push({ ...insidePoint, y: support.authoredTop });
+          outsideTop.push({ ...outsidePoint, y: supportTopAt(outsidePoint) });
+          insideTop.push({ ...insidePoint, y: supportTopAt(insidePoint) });
+        }
+        const faces = [
+          [...outsideBottom, ...[...outsideTop].reverse()],
+          [[...insideBottom].reverse(), ...insideTop].flat(),
+          [...outsideTop, ...[...insideTop].reverse()],
+          [[...outsideBottom].reverse(), ...insideBottom].flat(),
+          [outsideBottom[0], insideBottom[0], insideTop[0], outsideTop[0]],
+          [
+            insideBottom[insideBottom.length - 1],
+            outsideBottom[outsideBottom.length - 1],
+            outsideTop[outsideTop.length - 1],
+            insideTop[insideTop.length - 1],
+          ],
+        ];
+        const selectedWall =
+          selection?.kind === "wall" && selection.index === wall.index;
+        faces.forEach((points, faceIndex) => {
+          modelSurfaces.push({
+            points,
+            pick: { kind: "wall", index: wall.index },
+            solidId: `derived-roof-support-${wall.index}`,
+            fill: selectedWall
+              ? faceIndex === 2
+                ? "#5ca9a8"
+                : "#96ceca"
+              : faceIndex === 2
+                ? "#70aaa8"
+                : "#a7cac6",
+            stroke: selectedWall ? "#0f696c" : "#4f8583",
+            lineWidth: selectedWall ? 2.2 : 1,
+          });
+        });
+      });
+    };
+
     const addCeilingSurfaces = (
       roofUndersideAt: (point: Point2) => number | null,
-      roofFramingFaces: Point3[][],
+      roofFinishUndersideAt: (point: Point2) => number | null,
     ) => {
       formCeilingRegions.current = [];
       if (
         !showCeiling ||
-        !wallsClosed ||
-        wallPoints.length < 3 ||
-        roomInteriorPoints.length < 3
+        !roofClosed ||
+        structuralCeilingFootprint.length < 3 ||
+        finishCeilingFootprint.length < 3
       ) {
         setCeilingHandlePosition((current) => (current ? null : current));
         return;
@@ -2028,13 +2222,14 @@ export default function Home() {
       const finishThickness = ceiling.finishThicknessInches / 12;
       const selectedCeiling = selection?.kind === "ceiling";
       const subdivisions = 12;
-      const structuralFootprint = roofFramingFaces.length
-        ? clipPlanPolygonAboveRoofPlanes(
-            wallPoints,
-            roofFramingFaces,
+      const ceilingFramingTopAt = (point: Point2) =>
+        Math.max(
+          framingBottom,
+          Math.min(
             framingBottom + framingThickness,
-          )
-        : wallPoints;
+            (roofFinishUndersideAt(point) ?? framingBottom) - 0.01,
+          ),
+        );
       const clippedBottomAt = (point: Point2) =>
         Math.min(framingBottom, roofUndersideAt(point) ?? framingBottom);
       const finishBottomAt = (point: Point2) => {
@@ -2063,6 +2258,7 @@ export default function Home() {
         solidId,
         topAt,
         bottomAt,
+        limitAt,
         breakAt,
         topFill,
         bottomFill,
@@ -2073,6 +2269,10 @@ export default function Home() {
         solidId: string;
         topAt: (point: Point2) => number;
         bottomAt: (point: Point2) => number;
+        limitAt?: {
+          heightAt: (point: Point2) => number | null;
+          minimum: number;
+        };
         breakAt?: {
           heightAt: (point: Point2) => number | null;
           height: number;
@@ -2099,63 +2299,123 @@ export default function Home() {
         );
         const cellWidth = (bounds.maxX - bounds.minX) / subdivisions;
         const cellDepth = (bounds.maxZ - bounds.minZ) / subdivisions;
+        const limitedBoundaryEdges = new Map<
+          string,
+          { start: Point2; end: Point2; count: number }
+        >();
+        const boundaryEdgeKey = (start: Point2, end: Point2) => {
+          const pointKey = (point: Point2) =>
+            `${point.x.toFixed(5)}:${point.z.toFixed(5)}`;
+          const startKey = pointKey(start);
+          const endKey = pointKey(end);
+          return startKey < endKey
+            ? `${startKey}|${endKey}`
+            : `${endKey}|${startKey}`;
+        };
         for (let xIndex = 0; xIndex < subdivisions; xIndex += 1) {
           for (let zIndex = 0; zIndex < subdivisions; zIndex += 1) {
             const x0 = bounds.minX + xIndex * cellWidth;
             const x1 = bounds.minX + (xIndex + 1) * cellWidth;
             const z0 = bounds.minZ + zIndex * cellDepth;
             const z1 = bounds.minZ + (zIndex + 1) * cellDepth;
-            const cellCenter = { x: (x0 + x1) / 2, z: (z0 + z1) / 2 };
-            if (!pointInPlanPolygon(cellCenter, footprint)) continue;
             const corners: Point2[] = [
               { x: x0, z: z0 },
               { x: x1, z: z0 },
               { x: x1, z: z1 },
               { x: x0, z: z1 },
             ];
+            let boundedCell = clipPlanPolygonToConvexBoundary(corners, footprint);
+            if (limitAt) {
+              boundedCell = clipPlanPolygonByHeight(
+                boundedCell,
+                limitAt.heightAt,
+                limitAt.minimum,
+                true,
+              );
+            }
+            if (boundedCell.length < 3) continue;
             const patches = breakAt
               ? [
                   clipPlanPolygonByHeight(
-                    corners,
+                    boundedCell,
                     breakAt.heightAt,
                     breakAt.height,
                     true,
                   ),
                   clipPlanPolygonByHeight(
-                    corners,
+                    boundedCell,
                     breakAt.heightAt,
                     breakAt.height,
                     false,
                   ),
                 ].filter((patch) => patch.length >= 3)
-              : [corners];
+              : [boundedCell];
             patches.forEach((patch) => {
               const topFace = patch.map((point) => ({ ...point, y: topAt(point) }));
               const bottomFace = patch.map((point) => ({
                 ...point,
                 y: bottomAt(point),
               }));
-              modelSurfaces.push({
-                points: topFace,
-                pick: { kind: "ceiling", id: ceiling.id },
-                solidId,
-                fill: topFill((xIndex + zIndex) % 2 === 0),
-                stroke,
-                lineWidth: selectedCeiling ? 1.1 : 0.4,
+              const planPatch = patch.map((point) => ({
+                x: point.x,
+                y: point.z,
+                depth: 0,
+              }));
+              triangulateDepthPolygon(planPatch).forEach((triangle) => {
+                modelSurfaces.push({
+                  points: triangle.map((index) => topFace[index]),
+                  pick: { kind: "ceiling", id: ceiling.id },
+                  solidId,
+                  fill: topFill((xIndex + zIndex) % 2 === 0),
+                  stroke,
+                  lineWidth: selectedCeiling ? 1.1 : 0.4,
+                });
+                modelSurfaces.push({
+                  points: triangle
+                    .map((index) => bottomFace[index])
+                    .reverse(),
+                  pick: { kind: "ceiling", id: ceiling.id },
+                  solidId,
+                  fill: bottomFill,
+                  stroke,
+                  lineWidth: selectedCeiling ? 1 : 0.35,
+                });
               });
-              modelSurfaces.push({
-                points: [...bottomFace].reverse(),
-                pick: { kind: "ceiling", id: ceiling.id },
-                solidId,
-                fill: bottomFill,
-                stroke,
-                lineWidth: selectedCeiling ? 1 : 0.35,
-              });
+              if (limitAt) {
+                patch.forEach((start, edgeIndex) => {
+                  const end = patch[(edgeIndex + 1) % patch.length];
+                  const key = boundaryEdgeKey(start, end);
+                  const existing = limitedBoundaryEdges.get(key);
+                  limitedBoundaryEdges.set(key, {
+                    start,
+                    end,
+                    count: (existing?.count ?? 0) + 1,
+                  });
+                });
+              }
               formCeilingRegions.current.push(bottomFace.map(project));
             });
           }
         }
-        footprint.forEach((start, edgeIndex) => {
+        if (limitAt) {
+          limitedBoundaryEdges.forEach(({ start, end, count }) => {
+            if (count !== 1) return;
+            modelSurfaces.push({
+              points: [
+                { ...start, y: topAt(start) },
+                { ...end, y: topAt(end) },
+                { ...end, y: bottomAt(end) },
+                { ...start, y: bottomAt(start) },
+              ],
+              pick: { kind: "ceiling", id: ceiling.id },
+              solidId,
+              fill: sideFill,
+              stroke,
+              lineWidth: selectedCeiling ? 1.5 : 0.7,
+            });
+          });
+        }
+        if (!limitAt) footprint.forEach((start, edgeIndex) => {
           const end = footprint[(edgeIndex + 1) % footprint.length];
           const samples = Array.from({ length: 13 }, (_, index) => {
             const amount = index / 12;
@@ -2183,10 +2443,14 @@ export default function Home() {
       };
 
       addClosedLayer({
-        footprint: structuralFootprint,
+        footprint: structuralCeilingFootprint,
         solidId: `ceiling-${ceiling.id}-framing`,
-        topAt: () => framingBottom + framingThickness,
+        topAt: ceilingFramingTopAt,
         bottomAt: () => framingBottom,
+        limitAt: {
+          heightAt: roofFinishUndersideAt,
+          minimum: framingBottom + 0.01,
+        },
         topFill: (checker) =>
           selectedCeiling
             ? checker ? "#58a78f" : "#67b198"
@@ -2196,7 +2460,7 @@ export default function Home() {
         stroke: selectedCeiling ? "#175c4c" : "#647e75",
       });
       addClosedLayer({
-        footprint: roomInteriorPoints,
+        footprint: finishCeilingFootprint,
         solidId: `ceiling-${ceiling.id}-finish`,
         topAt: clippedBottomAt,
         bottomAt: finishBottomAt,
@@ -2210,14 +2474,12 @@ export default function Home() {
         stroke: selectedCeiling ? "#766e63" : "#aaa399",
       });
 
-      ceilingOutline = structuralFootprint.map((point) =>
-        project({ x: point.x, y: framingBottom, z: point.z }),
-      );
+      ceilingOutline = [];
       if (selectedCeiling) {
-        const anchor = roomInteriorPoints.reduce(
+        const anchor = finishCeilingFootprint.reduce(
           (result, point) => ({
-            x: result.x + point.x / roomInteriorPoints.length,
-            z: result.z + point.z / roomInteriorPoints.length,
+            x: result.x + point.x / finishCeilingFootprint.length,
+            z: result.z + point.z / finishCeilingFootprint.length,
           }),
           { x: 0, z: 0 },
         );
@@ -2427,8 +2689,24 @@ export default function Home() {
     formEaveRegions.current = [];
     formRoofRegions.current = [];
     if (roofClosed && roofPoints.length >= 3) {
-      const bounds = roofBounds;
-      const dominantX = dominantRoofAxisIsX;
+      const bearingDatumPoints =
+        wallsClosed && wallPoints.length >= 3 ? wallPoints : roofPoints;
+      const bounds = bearingDatumPoints.reduce(
+        (result, point) => ({
+          minX: Math.min(result.minX, point.x),
+          maxX: Math.max(result.maxX, point.x),
+          minZ: Math.min(result.minZ, point.z),
+          maxZ: Math.max(result.maxZ, point.z),
+        }),
+        {
+          minX: Number.POSITIVE_INFINITY,
+          maxX: Number.NEGATIVE_INFINITY,
+          minZ: Number.POSITIVE_INFINITY,
+          maxZ: Number.NEGATIVE_INFINITY,
+        },
+      );
+      const dominantX =
+        bounds.maxX - bounds.minX >= bounds.maxZ - bounds.minZ;
       const roofCenter = {
         x: (bounds.minX + bounds.maxX) / 2,
         z: (bounds.minZ + bounds.maxZ) / 2,
@@ -2436,29 +2714,47 @@ export default function Home() {
       const roofWidth = bounds.maxX - bounds.minX;
       const roofDepth = bounds.maxZ - bounds.minZ;
       const nominalSlope = Math.max(0.01, pitch / 12);
+      const bearingRunForEdge = (edge: (typeof roofEdges)[number]) => {
+        const wall = wallUnderRoofEdge(edge, walls);
+        return wall
+          ? pointToSegmentDistance(midpoint(edge.start, edge.end), wall.start, wall.end)
+          : 0;
+      };
+      const bearingRuns = new Map(
+        roofEdges.map((edge) => [edge.index, bearingRunForEdge(edge)]),
+      );
+      // `roofBase` is the bearing elevation at the wall line. The solved roof
+      // facets are the structural underside, extended outward to the authored
+      // roof boundary. Rafter depth is added above these fixed bearing planes.
+      const structuralUndersideElevationForEdge = (
+        edge: (typeof roofEdges)[number],
+      ) =>
+        edgeElevation(edge.index) -
+        nominalSlope * (bearingRuns.get(edge.index) ?? 0);
       const shortSpan = Math.min(roofWidth, roofDepth);
       const ridgeInset = shortSpan / 2;
       const rise = Math.max(0.25, ridgeInset * nominalSlope);
+      const ridgeElevation = roofBase + rise;
       const ridgeA: Point3 = dominantX
         ? {
             x: bounds.minX + ridgeInset,
-            y: roofBase + rise,
+            y: ridgeElevation,
             z: roofCenter.z,
           }
         : {
             x: roofCenter.x,
-            y: roofBase + rise,
+            y: ridgeElevation,
             z: bounds.minZ + ridgeInset,
           };
       const ridgeB: Point3 = dominantX
         ? {
             x: bounds.maxX - ridgeInset,
-            y: roofBase + rise,
+            y: ridgeElevation,
             z: roofCenter.z,
           }
         : {
             x: roofCenter.x,
-            y: roofBase + rise,
+            y: ridgeElevation,
             z: bounds.maxZ - ridgeInset,
           };
       const peak: Point3 = {
@@ -2466,81 +2762,25 @@ export default function Home() {
         y:
           roofKind === "shed"
             ? roofBase + rise * 0.45
-            : roofBase + rise,
+            : ridgeElevation,
         z: roofCenter.z,
       };
       const transitionSlopeAtLoweredCorner = (elevation: number) =>
         roofKind === "hip"
           ? Math.max(
               nominalSlope,
-              (roofBase + rise - elevation) / Math.max(0.01, ridgeInset),
+              (ridgeElevation - elevation) / Math.max(0.01, ridgeInset),
             )
           : nominalSlope;
+      const eaveElevations = new Map(
+        roofEdges.map((edge) => [
+          edge.index,
+          structuralUndersideElevationForEdge(edge),
+        ]),
+      );
       const edgeProfiles = roofEdges.map((edge, edgePosition) => {
         const length = segmentLength(edge.start, edge.end);
-        const eaveElevation = edgeElevation(edge.index);
-        const pointAlongEdge = (amount: number) => ({
-          x: edge.start.x + (edge.end.x - edge.start.x) * amount,
-          z: edge.start.z + (edge.end.z - edge.start.z) * amount,
-        });
-        const elevationOffset = eaveElevation - roofBase;
-
-        if (elevationOffset < -0.0001) {
-          const points = [
-            { x: edge.start.x, y: eaveElevation, z: edge.start.z },
-            { x: edge.start.x, y: eaveElevation, z: edge.start.z },
-            { x: edge.end.x, y: eaveElevation, z: edge.end.z },
-            { x: edge.end.x, y: eaveElevation, z: edge.end.z },
-          ];
-          return {
-            edge,
-            hasRaisedTransitions: false,
-            needsTriangulation: false,
-            points,
-            ownedPoints: [points[1], points[2]],
-          };
-        }
-
-        if (elevationOffset > 0.0001) {
-          const transitionRun = Math.min(
-            length * 0.45,
-            elevationOffset / nominalSlope,
-          );
-          const transitionFraction =
-            length > 0 ? transitionRun / length : 0;
-          const plateauStart = pointAlongEdge(transitionFraction);
-          const plateauEnd = pointAlongEdge(1 - transitionFraction);
-          const points = [
-            {
-              x: edge.start.x,
-              y: roofBase,
-              z: edge.start.z,
-            },
-            {
-              x: plateauStart.x,
-              y: eaveElevation,
-              z: plateauStart.z,
-            },
-            {
-              x: plateauEnd.x,
-              y: eaveElevation,
-              z: plateauEnd.z,
-            },
-            {
-              x: edge.end.x,
-              y: roofBase,
-              z: edge.end.z,
-            },
-          ];
-          return {
-            edge,
-            hasRaisedTransitions: true,
-            needsTriangulation: true,
-            points,
-            ownedPoints: [points[1], points[2]],
-          };
-        }
-
+        const eaveElevation = eaveElevations.get(edge.index) ?? roofBase;
         const previousEdge =
           roofEdges[
             (edgePosition + roofEdges.length - 1) % roofEdges.length
@@ -2548,21 +2788,25 @@ export default function Home() {
         const nextEdge =
           roofEdges[(edgePosition + 1) % roofEdges.length];
         const startElevation = Math.min(
-          roofBase,
-          edgeElevation(previousEdge.index),
+          eaveElevation,
+          eaveElevations.get(previousEdge.index) ?? eaveElevation,
         );
         const endElevation = Math.min(
-          roofBase,
-          edgeElevation(nextEdge.index),
+          eaveElevation,
+          eaveElevations.get(nextEdge.index) ?? eaveElevation,
         );
+        const pointAlongEdge = (amount: number) => ({
+          x: edge.start.x + (edge.end.x - edge.start.x) * amount,
+          z: edge.start.z + (edge.end.z - edge.start.z) * amount,
+        });
         const startRun = Math.min(
           length * 0.45,
-          (roofBase - startElevation) /
+          (eaveElevation - startElevation) /
             transitionSlopeAtLoweredCorner(startElevation),
         );
         const endRun = Math.min(
           length * 0.45,
-          (roofBase - endElevation) /
+          (eaveElevation - endElevation) /
             transitionSlopeAtLoweredCorner(endElevation),
         );
         const startBend = pointAlongEdge(length > 0 ? startRun / length : 0);
@@ -2577,12 +2821,12 @@ export default function Home() {
           },
           {
             x: startBend.x,
-            y: roofBase,
+            y: eaveElevation,
             z: startBend.z,
           },
           {
             x: endBend.x,
-            y: roofBase,
+            y: eaveElevation,
             z: endBend.z,
           },
           {
@@ -2591,14 +2835,15 @@ export default function Home() {
             z: edge.end.z,
           },
         ];
+        const hasTransitions =
+          startElevation < eaveElevation - 0.0001 ||
+          endElevation < eaveElevation - 0.0001;
         return {
           edge,
-          hasRaisedTransitions: false,
-          needsTriangulation:
-            startElevation < roofBase - 0.0001 ||
-            endElevation < roofBase - 0.0001,
+          hasRaisedTransitions: hasTransitions,
+          needsTriangulation: hasTransitions,
           points,
-          ownedPoints: points,
+          ownedPoints: hasTransitions ? [points[1], points[2]] : points,
         };
       });
       if (selection?.kind === "roof-edge") {
@@ -2791,32 +3036,38 @@ export default function Home() {
           point,
           roofFacets.map((facet) => facet.points),
         );
-      const structuralUndersides = offsetRoofFacesWatertight(
+      const structuralTops = offsetRoofFacesWatertight(
         roofFacets.map((facet) => facet.points),
-        -roofAssembly.structuralDepthInches / 12,
+        roofAssembly.structuralDepthInches / 12,
         roofBoundaryPoints,
         nominalSlope,
       );
       const roofingTops = offsetRoofFacesWatertight(
         roofFacets.map((facet) => facet.points),
-        roofAssembly.buildUpThicknessInches / 12,
+        (roofAssembly.structuralDepthInches +
+          roofAssembly.buildUpThicknessInches) /
+          12,
         roofBoundaryPoints,
         nominalSlope,
       );
       const faceAssemblies = roofFacets.map((facet, index) => ({
         face: facet,
-        structuralUnderside: structuralUndersides[index],
+        structuralUnderside: facet.points,
+        structuralTop: structuralTops[index],
         roofingTop: roofingTops[index],
       }));
       const structuralUndersideHeightAt = (point: Point2) =>
         roofHeightFromFaces(
           point,
-          faceAssemblies.map(({ structuralUnderside }) => structuralUnderside),
+          roofFacets.map((facet) => facet.points),
         );
+      const roofFinishUndersideHeightAt = (point: Point2) =>
+        roofHeightFromFaces(point, structuralTops);
       addWallSurfaces(structuralUndersideHeightAt);
+      addDerivedRoofSupportSurfaces(structuralUndersideHeightAt);
       addCeilingSurfaces(
         structuralUndersideHeightAt,
-        roofFacets.map((facet) => facet.points),
+        roofFinishUndersideHeightAt,
       );
       const roofPointKey = (point: Point3) =>
         `${point.x.toFixed(4)}:${point.y.toFixed(4)}:${point.z.toFixed(4)}`;
@@ -2837,9 +3088,9 @@ export default function Home() {
             selection.index === face.index;
           const projectedFace = face.points.map(project);
           formRoofRegions.current.push(projectedFace);
-          // `face.points` is the solved top of structural framing.  Build the
-          // visible roof around that datum: structure descends below it and the
-          // shared covering build-up grows above it, both normal to the slope.
+          // `face.points` is the solved structural underside, fixed by the
+          // wall-bearing geometry. Structure and covering both grow upward,
+          // normal to the slope, so changing member depth cannot move bearing.
           const roofFill = selectedEdge
             ? "#d97834"
             : selection?.kind === "roof"
@@ -2869,6 +3120,9 @@ export default function Home() {
           });
         });
 
+      const roofSurfaceEdgeStroke = "#171512";
+      const roofSurfaceEdgeWidth = 1.35;
+
       // Draw only real roof-plane boundaries. Facets that share the same edge
       // owner are coplanar subdivisions used to keep the mesh well formed, so
       // their common edge must not read as an architectural crease.
@@ -2877,7 +3131,7 @@ export default function Home() {
         {
           start: Point3;
           end: Point3;
-          owners: Set<number>;
+          normals: Point3[];
           occurrences: number;
         }
       >();
@@ -2893,25 +3147,41 @@ export default function Home() {
           const edge = facetEdges.get(key) ?? {
             start,
             end,
-            owners: new Set<number>(),
+            normals: [],
             occurrences: 0,
           };
-          edge.owners.add(facet.index);
+          edge.normals.push(roofFaceNormal(facet.points));
           edge.occurrences += 1;
           facetEdges.set(key, edge);
         });
       });
-      facetEdges.forEach(({ start, end, owners, occurrences }) => {
-        if (occurrences < 2 || owners.size < 2) return;
+      facetEdges.forEach(({ start, end, normals, occurrences }) => {
+        if (occurrences < 2 || normals.length < 2) return;
+        const referenceNormal = normals[0];
+        const hasSurfaceChange = normals.slice(1).some(
+          (normal) =>
+            referenceNormal.x * normal.x +
+              referenceNormal.y * normal.y +
+              referenceNormal.z * normal.z <
+            0.9995,
+        );
+        if (!hasSurfaceChange) return;
         const topStart = roofingTopByPoint.get(roofPointKey(start));
         const topEnd = roofingTopByPoint.get(roofPointKey(end));
-        if (!topStart || !topEnd) return;
-        const selectedEdge =
-          selection?.kind === "roof-edge" && owners.has(selection.index);
+        const undersideStart = structuralUndersideByPoint.get(
+          roofPointKey(start),
+        );
+        const undersideEnd = structuralUndersideByPoint.get(roofPointKey(end));
+        if (!topStart || !topEnd || !undersideStart || !undersideEnd) return;
         modelLines.push({
           points: [topStart, topEnd],
-          stroke: selectedEdge ? "#171512" : "#9b572c",
-          lineWidth: selectedEdge ? 2.5 : 1,
+          stroke: roofSurfaceEdgeStroke,
+          lineWidth: roofSurfaceEdgeWidth,
+        });
+        modelLines.push({
+          points: [undersideStart, undersideEnd],
+          stroke: roofSurfaceEdgeStroke,
+          lineWidth: roofSurfaceEdgeWidth,
         });
       });
 
@@ -2941,8 +3211,19 @@ export default function Home() {
             pick: { kind: "roof" },
             solidId: "roof-assembly",
             fill: selectedEdge ? "#c77a45" : "#c98451",
-            stroke: selectedEdge ? "#171512" : "#925631",
-            lineWidth: selectedEdge ? 1.4 : 0.65,
+            stroke: roofSurfaceEdgeStroke,
+            lineWidth: roofSurfaceEdgeWidth,
+            outline: false,
+          });
+          modelLines.push({
+            points: [topStart, topEnd],
+            stroke: roofSurfaceEdgeStroke,
+            lineWidth: roofSurfaceEdgeWidth,
+          });
+          modelLines.push({
+            points: [undersideStart, undersideEnd],
+            stroke: roofSurfaceEdgeStroke,
+            lineWidth: roofSurfaceEdgeWidth,
           });
         });
       });
@@ -2963,16 +3244,16 @@ export default function Home() {
         if (!top || !underside) return;
         modelLines.push({
           points: [top, underside],
-          stroke: "#6f3f27",
-          lineWidth: 1.25,
+          stroke: roofSurfaceEdgeStroke,
+          lineWidth: roofSurfaceEdgeWidth,
         });
       });
 
       if (showTopology && roofKind !== "shed") {
         modelLines.push({
           points: [ridgeA, ridgeB],
-          stroke: "#63371f",
-          lineWidth: 1.5,
+          stroke: roofSurfaceEdgeStroke,
+          lineWidth: roofSurfaceEdgeWidth,
         });
       }
 
@@ -2984,11 +3265,6 @@ export default function Home() {
         });
         const selectedEdge =
           selection?.kind === "roof-edge" && selection.index === edge.index;
-        modelLines.push({
-          points,
-          stroke: selectedEdge ? "#16838a" : "#a95829",
-          lineWidth: selectedEdge ? 4 : 2,
-        });
         const middle = {
           x: (projectedProfile[1].x + projectedProfile[2].x) / 2,
           y: (projectedProfile[1].y + projectedProfile[2].y) / 2,
@@ -3068,14 +3344,14 @@ export default function Home() {
         context.fillStyle = "#126a70";
         context.font = "600 8px monospace";
         context.fillText(
-          `FIXED ROOF BASE · ${feetInches(roofBase)}`,
+          `FIXED BEARING · ${feetInches(roofBase)}`,
           16,
           24,
         );
       }
     } else {
       addWallSurfaces(() => null);
-      addCeilingSurfaces(() => null, []);
+      addCeilingSurfaces(() => null, () => null);
       renderClippedModel();
       setEaveHandlePosition((current) => (current ? null : current));
       context.fillStyle = "#a95829";
@@ -3087,7 +3363,9 @@ export default function Home() {
     center.z,
     ceiling,
     clipWalls,
+    derivedSupportForWall,
     edgeElevation,
+    finishCeilingFootprint,
     formFocusOffset,
     formZoom,
     orbit,
@@ -3098,7 +3376,6 @@ export default function Home() {
     roofEdges,
     roofKind,
     roofPoints,
-    roomInteriorPoints,
     sectionBox,
     selection,
     showDatums,
@@ -3106,6 +3383,7 @@ export default function Home() {
     showCeiling,
     showTopology,
     showWalls,
+    structuralCeilingFootprint,
     wallHeights,
     wallThicknesses,
     wallPoints,
@@ -3204,8 +3482,8 @@ export default function Home() {
       setSelection({ kind: "roof-edge", index: roofHit.index });
     } else if (
       showCeiling &&
-      roomInteriorPoints.length >= 3 &&
-      pointInPlanPolygon(point, roomInteriorPoints)
+      structuralCeilingFootprint.length >= 3 &&
+      pointInPlanPolygon(point, structuralCeilingFootprint)
     ) {
       setSelection({ kind: "ceiling", id: ceiling.id });
       setCeilingHeightDraft(ceiling.bottomOfFramingElevationFeet.toFixed(2));
@@ -3234,7 +3512,11 @@ export default function Home() {
     selection?.kind === "catalog"
       ? eaveCatalog.find((condition) => condition.id === selection.id)
       : null;
-  const roomBounds = roomInteriorPoints.reduce(
+  const selectedWallSupport =
+    selection?.kind === "wall"
+      ? derivedSupportForWall(selection.index)
+      : undefined;
+  const roomBounds = finishCeilingFootprint.reduce(
     (result, point) => ({
       minX: Math.min(result.minX, point.x),
       maxX: Math.max(result.maxX, point.x),
@@ -3248,7 +3530,7 @@ export default function Home() {
       maxZ: Number.NEGATIVE_INFINITY,
     },
   );
-  const structuralCeilingBounds = wallPoints.reduce(
+  const structuralCeilingBounds = structuralCeilingFootprint.reduce(
     (result, point) => ({
       minX: Math.min(result.minX, point.x),
       maxX: Math.max(result.maxX, point.x),
@@ -3398,19 +3680,6 @@ export default function Home() {
                 <strong>Draw roof</strong>
                 <small>Click the start point to close</small>
               </button>
-              <button
-                className={selection?.kind === "ceiling" ? "active" : ""}
-                disabled={roomInteriorPoints.length < 3}
-                onClick={() => {
-                  setCommand("select");
-                  setSelection({ kind: "ceiling", id: ceiling.id });
-                  setCeilingHeightDraft(ceiling.bottomOfFramingElevationFeet.toFixed(2));
-                }}
-              >
-                <span>▱</span>
-                <strong>Select ceiling</strong>
-                <small>{PRIMARY_ROOM.name} · interior wall faces</small>
-              </button>
             </div>
             {command !== "select" && (
               <div className="active-command-card">
@@ -3442,92 +3711,53 @@ export default function Home() {
             )}
           </div>
 
-          <div className="control-section">
-            <ControlHeading number="02" title="Roof volume" />
-            <div className="compact-select-grid">
-              <label className="compact-select-control">
-                <span>Form</span>
-                <select
-                  value={roofKind}
-                  onChange={(event) => setRoofKind(event.target.value as RoofKind)}
-                >
-                  {(Object.keys(ROOF_FORMS) as RoofKind[]).map((kind) => (
-                    <option key={kind} value={kind}>
-                      {ROOF_FORMS[kind].label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="compact-select-control">
-                <span>Structure</span>
-                <select
-                  value={roofSystemType}
-                  onChange={(event) =>
-                    changeRoofSystem(event.target.value as RoofSystemType)
-                  }
-                >
-                  {(Object.keys(SYSTEM_LABELS) as RoofSystemType[]).map(
-                    (systemType) => (
-                      <option key={systemType} value={systemType}>
-                        {SYSTEM_LABELS[systemType]}
-                      </option>
-                    ),
-                  )}
-                </select>
-              </label>
+          <div className="control-section file-entities-section">
+            <ControlHeading number="02" title="File entities" />
+            <p className="file-entities-copy">
+              Select an entity type to edit its properties in the inspector.
+            </p>
+            <div className="file-entity-list">
+              <button
+                className={selection?.kind === "wall" ? "active" : ""}
+                disabled={walls.length === 0}
+                onClick={() => {
+                  setCommand("select");
+                  setSelection({ kind: "wall", index: 0 });
+                  setWallHeightDraft((wallHeights[0] ?? 9).toFixed(2));
+                }}
+              >
+                <span>Walls</span>
+                <strong>{walls.length}</strong>
+                <small>Authored segments</small>
+              </button>
+              <button
+                className={selection?.kind === "roof" ? "active" : ""}
+                disabled={!roofClosed}
+                onClick={() => {
+                  setCommand("select");
+                  setSelection({ kind: "roof" });
+                }}
+              >
+                <span>Roof</span>
+                <strong>{roofClosed ? 1 : 0}</strong>
+                <small>{ROOF_FORMS[roofKind].label} volume</small>
+              </button>
+              <button
+                className={selection?.kind === "ceiling" ? "active" : ""}
+                disabled={structuralCeilingFootprint.length < 3}
+                onClick={() => {
+                  setCommand("select");
+                  setSelection({ kind: "ceiling", id: ceiling.id });
+                  setCeilingHeightDraft(
+                    ceiling.bottomOfFramingElevationFeet.toFixed(2),
+                  );
+                }}
+              >
+                <span>Ceiling</span>
+                <strong>{structuralCeilingFootprint.length >= 3 ? 1 : 0}</strong>
+                <small>Room-owned · roof-contained</small>
+              </button>
             </div>
-            <p className="roof-form-description">
-              {ROOF_FORMS[roofKind].description}
-            </p>
-            <Range
-              label="Roof base elevation"
-              value={roofBase}
-              min={4}
-              max={30}
-              step={0.25}
-              output={feetInches(roofBase)}
-              onChange={setRoofBase}
-            />
-            <Range
-              label="Pitch"
-              value={pitch}
-              min={1}
-              max={16}
-              step={0.5}
-              output={`${pitch.toFixed(1)}:12`}
-              onChange={setPitch}
-            />
-            <Range
-              label="Shared rafter depth"
-              value={roofAssembly.structuralDepthInches}
-              min={3.5}
-              max={15.25}
-              step={0.125}
-              output={`${roofAssembly.structuralDepthInches.toFixed(3)}″`}
-              onChange={(structuralDepthInches) =>
-                updateRoofAssembly({ structuralDepthInches })
-              }
-            />
-            <Range
-              label="Shared roof build-up"
-              value={roofAssembly.buildUpThicknessInches}
-              min={0.125}
-              max={4}
-              step={0.125}
-              output={`${roofAssembly.buildUpThicknessInches.toFixed(3)}″`}
-              onChange={(buildUpThicknessInches) =>
-                updateRoofAssembly({ buildUpThicknessInches })
-              }
-            />
-            <p className="roof-form-description">
-              These two values are roof-wide. Eave conditions may vary at each
-              edge, but cannot create conflicting roof thicknesses.
-            </p>
-            <Check
-              label="Clip walls at roof surface"
-              value={clipWalls}
-              onChange={setClipWalls}
-            />
           </div>
 
           <div className="control-section catalog-section">
@@ -3543,8 +3773,9 @@ export default function Home() {
             </div>
             <p className="catalog-copy">
               <strong>{eaveCatalog.length} saved details.</strong> Reusable
-              details are typed by structural system. Edges can only subscribe
-              to details compatible with the active roof.
+              details are typed by structural system. An edge may retain one
+              assignment for every system; only the assignment matching the
+              overall roof system is applied.
             </p>
             <div className="eave-catalog-list">
               {eaveCatalog.map((condition) => (
@@ -3561,9 +3792,7 @@ export default function Home() {
                   <ConditionDiagram />
                   <span>
                     <strong>{condition.name}</strong>
-                    <small>
-                      {SYSTEM_LABELS[condition.systemType]}
-                    </small>
+                    <small>{SYSTEM_LABELS[condition.systemType]}</small>
                   </span>
                   <span className="catalog-chevron">›</span>
                 </button>
@@ -3571,25 +3800,6 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="control-section layer-section">
-            <ControlHeading number="04" title="View" />
-            <Check label="Wall volume" value={showWalls} onChange={setShowWalls} />
-            <Check
-              label="Ceiling assembly"
-              value={showCeiling}
-              onChange={setShowCeiling}
-            />
-            <Check
-              label="Construction datums"
-              value={showDatums}
-              onChange={setShowDatums}
-            />
-            <Check
-              label="Plane topology"
-              value={showTopology}
-              onChange={setShowTopology}
-            />
-          </div>
         </aside>
 
         <section
@@ -3937,6 +4147,36 @@ export default function Home() {
                     </button>
                   );
                 })}
+              <div className="form-view-controls" aria-label="Model visibility">
+                <button
+                  className={showWalls ? "active" : ""}
+                  aria-pressed={showWalls}
+                  onClick={() => setShowWalls((current) => !current)}
+                >
+                  Walls
+                </button>
+                <button
+                  className={showCeiling ? "active" : ""}
+                  aria-pressed={showCeiling}
+                  onClick={() => setShowCeiling((current) => !current)}
+                >
+                  Ceiling
+                </button>
+                <button
+                  className={showDatums ? "active" : ""}
+                  aria-pressed={showDatums}
+                  onClick={() => setShowDatums((current) => !current)}
+                >
+                  Datums
+                </button>
+                <button
+                  className={showTopology ? "active" : ""}
+                  aria-pressed={showTopology}
+                  onClick={() => setShowTopology((current) => !current)}
+                >
+                  Topology
+                </button>
+              </div>
               <button
                 className={`section-box-toggle${showSectionBox ? " active" : ""}`}
                 aria-pressed={showSectionBox}
@@ -4166,11 +4406,12 @@ export default function Home() {
                 />
               </div>
               <div className="detail-inspector-note">
-                Ceiling framing remains flat and stops where its top reaches the
-                roof framing top. The interior finish continues from the flat
-                joist underside onto the sloped roof underside. Its starting
-                footprint spans outside wall face to outside wall face; finish
-                spans only between the inward wall faces.
+                Ceiling framing remains full-depth and horizontal through the
+                wall to its outside face wherever that face remains inside the
+                roof footprint, overlapping roof structure where they meet.
+                Only an upper outside corner that reaches the roof finish layer
+                is cut back along that layer. The ceiling finish remains bounded
+                by both the inward wall faces and the roof footprint.
               </div>
               <dl className="inspector-data">
                 <div>
@@ -4196,7 +4437,7 @@ export default function Home() {
                 </div>
                 <div>
                   <dt>Roof clipping limit</dt>
-                  <dd>Flat framing stops at top · finish follows underside</dd>
+                  <dd>Plan clipped to roof · corner cuts at roof finish only</dd>
                 </div>
                 <div>
                   <dt>Default datum</dt>
@@ -4274,10 +4515,24 @@ export default function Home() {
                 </fieldset>
               </div>
               <div className="detail-inspector-note">
-                The authored path remains the outside face. Stud depth grows
-                inward and never repositions the roof.
+                The authored main wall keeps its own plate height and outside
+                face. When roof bearing is higher, a separate roof-support
+                derived segment continues upward and is trimmed to the sloped
+                roof underside; it does not rewrite this wall.
               </div>
               <dl className="inspector-data">
+                <div>
+                  <dt>Authored top</dt>
+                  <dd>{feetInches(wallHeights[selection.index] ?? 9)}</dd>
+                </div>
+                <div>
+                  <dt>Derived roof support</dt>
+                  <dd>
+                    {selectedWallSupport
+                      ? `${feetInches(selectedWallSupport.authoredTop)} → ${feetInches(selectedWallSupport.bearingElevation)} · roof edge ${selectedWallSupport.edgeIndex + 1}`
+                      : "None required"}
+                  </dd>
+                </div>
                 <div>
                   <dt>Roof clipping</dt>
                   <dd>{clipWalls ? "Displayed wall clips at roof" : "Off"}</dd>
@@ -4297,11 +4552,52 @@ export default function Home() {
               />
               <div className="inspector-selection-summary">
                 <span>Independent authored object</span>
-                <strong>{ROOF_FORMS[roofKind].label}</strong>
+                <strong>
+                  {ROOF_FORMS[roofKind].label} · {SYSTEM_LABELS[roofSystemType]}
+                </strong>
               </div>
               <div className="detail-form inspector-properties">
                 <label>
-                  <span>Roof base elevation</span>
+                  <span>Roof form</span>
+                  <select
+                    value={roofKind}
+                    onChange={(event) =>
+                      setRoofKind(event.target.value as RoofKind)
+                    }
+                  >
+                    {(Object.keys(ROOF_FORMS) as RoofKind[]).map((kind) => (
+                      <option key={kind} value={kind}>
+                        {ROOF_FORMS[kind].label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <fieldset className="roof-system-field inspector-roof-system">
+                  <legend>Overall roof structural system</legend>
+                  <div className="roof-system-options">
+                    {(Object.keys(SYSTEM_LABELS) as RoofSystemType[]).map(
+                      (systemType) => (
+                        <button
+                          key={systemType}
+                          type="button"
+                          className={
+                            roofSystemType === systemType ? "active" : ""
+                          }
+                          aria-pressed={roofSystemType === systemType}
+                          onClick={() => changeRoofSystem(systemType)}
+                        >
+                          {SYSTEM_LABELS[systemType]}
+                        </button>
+                      ),
+                    )}
+                  </div>
+                  <p>
+                    This system governs the whole selected roof. Edge detail
+                    assignments remain stored; only matching details are active.
+                  </p>
+                </fieldset>
+                <label>
+                  <span>Shared bearing elevation</span>
                   <div className="height-input">
                     <input
                       type="number"
@@ -4319,6 +4615,15 @@ export default function Home() {
                     <span>ft</span>
                   </div>
                 </label>
+                <Range
+                  label="Roof pitch"
+                  value={pitch}
+                  min={1}
+                  max={16}
+                  step={0.5}
+                  output={`${pitch.toFixed(1)}:12`}
+                  onChange={setPitch}
+                />
                 <label>
                   <span>Shared structural depth</span>
                   <div className="height-input">
@@ -4377,13 +4682,23 @@ export default function Home() {
                 </label>
               </div>
               <div className="detail-inspector-note">
-                The roof always starts from this fixed base elevation. Wall
-                height changes do not move it.
+                Set bearing to the wall top-plate elevation. The structural
+                underside stays fixed at the wall line; increasing member depth
+                grows the roof upward. Wall changes do not move this explicit
+                datum automatically.
               </div>
               <dl className="inspector-data">
                 <div>
+                  <dt>Overall structural system</dt>
+                  <dd>{SYSTEM_LABELS[roofSystemType]}</dd>
+                </div>
+                <div>
                   <dt>Boundary</dt>
                   <dd>{roofEdges.length} closed edges</dd>
+                </div>
+                <div>
+                  <dt>Derived roof supports</dt>
+                  <dd>{derivedRoofSupports.length} above authored walls</dd>
                 </div>
                 <div>
                   <dt>Pitch</dt>
@@ -4417,7 +4732,7 @@ export default function Home() {
               </div>
               <div className="detail-form inspector-properties">
                 <label>
-                  <span>Eave elevation</span>
+                  <span>Eave bearing elevation</span>
                   <div className="height-input">
                     <input
                       type="number"
@@ -4438,7 +4753,7 @@ export default function Home() {
                   </div>
                 </label>
                 <Range
-                  label="Raise / lower from roof base"
+                  label="Raise / lower from shared bearing"
                   value={relationships[selection.index]?.elevationOffset ?? 0}
                   min={-8}
                   max={8}
@@ -4456,23 +4771,55 @@ export default function Home() {
                     })
                   }
                 />
-                <label>
-                  <span>{SYSTEM_LABELS[roofSystemType]} detail</span>
-                  <select
-                    value={relationships[selection.index]?.conditionId ?? ""}
-                    onChange={(event) =>
-                      updateRelationship(selection.index, {
-                        conditionId: event.target.value,
-                      })
-                    }
-                  >
-                    {compatibleEaveDetails.map((condition) => (
-                      <option key={condition.id} value={condition.id}>
-                        {condition.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                <fieldset className="edge-detail-assignments">
+                  <legend>Assigned eave details</legend>
+                  <p>
+                    One assignment per system is retained on this edge. The
+                    overall roof system decides which one is applied.
+                  </p>
+                  <div>
+                    {eaveCatalog.map((condition) => {
+                      const assigned = relationships[
+                        selection.index
+                      ]?.conditionIds.includes(condition.id) ?? false;
+                      const active =
+                        assigned && condition.systemType === roofSystemType;
+                      return (
+                        <label
+                          key={condition.id}
+                          className={active ? "active" : assigned ? "assigned" : ""}
+                        >
+                          <input
+                            type="radio"
+                            name={`edge-${selection.index}-${condition.systemType}`}
+                            checked={assigned}
+                            onChange={() =>
+                              assignConditionToEdge(selection.index, condition.id)
+                            }
+                          />
+                          <span>
+                            <strong>{condition.name}</strong>
+                            <small>{SYSTEM_LABELS[condition.systemType]}</small>
+                          </span>
+                          <em>
+                            {active
+                              ? "Active · applied"
+                              : assigned
+                                ? "Assigned · inactive"
+                                : "Available"}
+                          </em>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </fieldset>
+                <div className="active-detail-summary">
+                  <span>Applied for {SYSTEM_LABELS[roofSystemType]} roof</span>
+                  <strong>
+                    {conditionForEdge(selection.index)?.name ??
+                      "No compatible assignment"}
+                  </strong>
+                </div>
                 <div className="condition-coordinate">
                   <span>
                     X{" "}
@@ -4493,15 +4840,15 @@ export default function Home() {
                 </div>
               </div>
               <div className="detail-inspector-note">
-                This eave is independently positioned from the fixed roof base.
-                Its full authored length stays horizontal. Lowering it moves
-                both shared corners and the neighboring side eaves jog down to
-                meet them. Raising it retains the existing short transition
-                facets back to the fixed roof-base corners.
+                This eave bearing is independently offset from the shared roof
+                bearing. Its full authored length stays horizontal. Lowering it
+                moves both shared corners and the neighboring side eaves jog
+                down to meet them. Raising it retains the existing short
+                transition facets back to the shared bearing corners.
               </div>
               <dl className="inspector-data">
                 <div>
-                  <dt>Roof base elevation</dt>
+                  <dt>Shared bearing elevation</dt>
                   <dd>{feetInches(roofBase)}</dd>
                 </div>
                 <div>
@@ -4564,9 +4911,9 @@ export default function Home() {
               </div>
               <h2>Room, ceiling, and roof are coordinated</h2>
               <p>
-                The room owns a ceiling whose footprint follows the interior
-                wall faces. Select the ceiling, roof, a wall, or an edge to edit
-                its properties.
+                The room owns outside-to-outside ceiling framing and a separate
+                finish bounded by the interior wall faces. Select the ceiling,
+                roof, a wall, or an edge to edit its properties.
               </p>
               <dl className="model-counts">
                 <div>
@@ -4579,7 +4926,11 @@ export default function Home() {
                 </div>
                 <div>
                   <dt>Ceilings</dt>
-                  <dd>{roomInteriorPoints.length >= 3 ? 1 : 0}</dd>
+                  <dd>{structuralCeilingFootprint.length >= 3 ? 1 : 0}</dd>
+                </div>
+                <div>
+                  <dt>Derived roof supports</dt>
+                  <dd>{derivedRoofSupports.length}</dd>
                 </div>
                 <div>
                   <dt>Clip walls</dt>
@@ -4600,10 +4951,11 @@ export default function Home() {
         </span>
         <span>
           {walls.length} walls · {roofEdges.length} roof edges ·{" "}
-          {roomInteriorPoints.length >= 3 ? 1 : 0} ceiling
+          {structuralCeilingFootprint.length >= 3 ? 1 : 0} ceiling
         </span>
         <span>
-          Roof {roofAssembly.structuralDepthInches.toFixed(3)}″ structure +{" "}
+          {SYSTEM_LABELS[roofSystemType]} roof ·{" "}
+          {roofAssembly.structuralDepthInches.toFixed(3)}″ structure +{" "}
           {roofAssembly.buildUpThicknessInches.toFixed(3)}″ build-up · ceiling framing bottom{" "}
           {feetInches(ceiling.bottomOfFramingElevationFeet)}
         </span>
@@ -4663,27 +5015,6 @@ function Range({
         value={value}
         onChange={(event) => onChange(Number(event.target.value))}
       />
-    </label>
-  );
-}
-
-function Check({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: boolean;
-  onChange: (value: boolean) => void;
-}) {
-  return (
-    <label className="check-control">
-      <input
-        type="checkbox"
-        checked={value}
-        onChange={(event) => onChange(event.target.checked)}
-      />
-      <span>{label}</span>
     </label>
   );
 }

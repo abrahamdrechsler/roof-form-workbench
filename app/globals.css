@@ -289,6 +289,60 @@ p {
   cursor: pointer;
 }
 
+.file-entities-copy {
+  margin: 0 0 7px;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.4;
+}
+
+.file-entity-list {
+  display: grid;
+  gap: 5px;
+}
+
+.file-entity-list button {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  padding: 7px 8px;
+  color: var(--ink);
+  text-align: left;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.file-entity-list button.active {
+  background: #e8f1f1;
+  border-color: #b7d1d1;
+  box-shadow: inset 2px 0 0 var(--teal);
+}
+
+.file-entity-list button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.file-entity-list button > span {
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.file-entity-list button > strong {
+  color: #126a70;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 10px;
+}
+
+.file-entity-list button > small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 8px;
+}
+
 .compact-form-options {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -337,17 +391,33 @@ p {
 }
 
 .roof-system-field {
-  margin-top: 12px;
+  min-width: 0;
+  margin: 12px 0 0;
+  padding: 9px;
+  background: #f7f5f0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
 }
 
-.roof-system-field > span {
-  display: block;
+.roof-system-field > legend {
+  padding: 0 4px;
   margin-bottom: 6px;
-  color: var(--muted);
+  color: var(--ink);
   font-size: 8px;
-  font-weight: 700;
+  font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.08em;
+}
+
+.roof-system-field > p {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.35;
+}
+
+.inspector-roof-system {
+  margin-top: 0;
 }
 
 .roof-system-options {
@@ -915,6 +985,41 @@ input[type="range"] {
   border-color: #16838a;
   outline: 2px solid rgba(22, 131, 138, 0.18);
   outline-offset: 1px;
+}
+
+.form-view-controls {
+  position: absolute;
+  right: 13px;
+  bottom: 72px;
+  z-index: 8;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  padding: 4px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  box-shadow: 0 1px 4px rgba(42, 38, 34, 0.08);
+}
+
+.form-view-controls button {
+  min-width: 54px;
+  height: 22px;
+  padding: 0 6px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 7px;
+  cursor: pointer;
+}
+
+.form-view-controls button.active {
+  color: #126a70;
+  background: #edf6f5;
+  border-color: #b9d7d4;
+  font-weight: 750;
 }
 
 .view-panel {
@@ -1542,6 +1647,109 @@ canvas {
 
 .inspector-properties .condition-coordinate {
   margin-top: 0;
+}
+
+.edge-detail-assignments {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.edge-detail-assignments > legend {
+  margin-bottom: 4px;
+  color: var(--ink);
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.edge-detail-assignments > p {
+  margin: 0 0 7px;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.35;
+}
+
+.edge-detail-assignments > div {
+  display: grid;
+  gap: 5px;
+}
+
+.edge-detail-assignments label {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 7px;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.edge-detail-assignments label.assigned {
+  background: #f5f3ee;
+  border-color: #c9c2b7;
+}
+
+.edge-detail-assignments label.active {
+  background: #edf6f5;
+  border-color: var(--teal);
+}
+
+.edge-detail-assignments label span,
+.edge-detail-assignments label strong,
+.edge-detail-assignments label small {
+  min-width: 0;
+  display: block;
+}
+
+.edge-detail-assignments label strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.edge-detail-assignments label small,
+.edge-detail-assignments label em {
+  color: var(--muted);
+  font-size: 7px;
+  font-style: normal;
+}
+
+.edge-detail-assignments label em {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.edge-detail-assignments label.active em {
+  color: #126a70;
+  font-weight: 800;
+}
+
+.active-detail-summary {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  background: #edf6f5;
+  border: 1px solid #b9d7d4;
+  border-radius: 4px;
+}
+
+.active-detail-summary span {
+  color: #43797b;
+  font-size: 7px;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.active-detail-summary strong {
+  color: #164f52;
+  font-size: 9px;
 }
 
 .stud-size-field {

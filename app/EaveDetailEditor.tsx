@@ -181,11 +181,12 @@ export function EaveDetailPreview({
     const isRaisedHeel = draft.systemType === "raisedHeelTruss";
     const isCantilevered = draft.systemType === "cantileveredRaisedHeelTruss";
     const isCommon = draft.systemType === "commonTruss";
-    const pitchRatio = inputs.pitch / 12;
+    const fixedPitch = DEFAULT_EAVE_PARAMETERS.pitch;
+    const pitchRatio = fixedPitch / 12;
     const slopeLength = Math.sqrt(1 + pitchRatio * pitchRatio);
     const memberDepth = isRafter ? inputs.rafterDepth : inputs.topChordDepth;
     const verticalDepth = memberDepth * slopeLength;
-    const fasciaHeight = Math.max(inputs.fasciaHeight, minimumFasciaHeight(memberDepth, inputs.pitch));
+    const fasciaHeight = Math.max(inputs.fasciaHeight, minimumFasciaHeight(memberDepth, fixedPitch));
     const memberLeft = -inputs.overhang;
     const memberRight = 48;
     const lowerAt = (x: number): number => {
@@ -265,7 +266,7 @@ export function EaveDetailPreview({
     context.textAlign = "left";
     context.fillStyle = "#6f6252";
     context.fillText(`${SYSTEM_LABELS[draft.systemType].toUpperCase()}`, 24, 26);
-    context.fillText(`${formatInches(inputs.overhang)} OVERHANG · ${inputs.pitch}:12`, 24, 44);
+    context.fillText(`${formatInches(inputs.overhang)} OVERHANG · ${fixedPitch}:12`, 24, 44);
     context.fillStyle = RED;
     context.fillText(isRafter ? `${formatInches(inputs.seatCut)} SEAT CUT` : `${formatInches(isRaisedHeel ? inputs.heelHeight : upperAt(0))} HEEL`, springCanvasX + 12, springCanvasY + 22);
   }, [draft]);
@@ -287,13 +288,18 @@ export function EaveDetailEditor({ draft, onChange, onCancel, onSave, saveLabel 
   const isRaisedHeel = draft.systemType === "raisedHeelTruss";
   const isCantilevered = draft.systemType === "cantileveredRaisedHeelTruss";
   const memberDepth = isRafter ? draft.parameters.rafterDepth : draft.parameters.topChordDepth;
-  const fasciaMinimum = minimumFasciaHeight(memberDepth, draft.parameters.pitch);
-  const parameters = { ...draft.parameters, fasciaHeight: Math.max(draft.parameters.fasciaHeight, fasciaMinimum) };
+  const fixedPitch = DEFAULT_EAVE_PARAMETERS.pitch;
+  const fasciaMinimum = minimumFasciaHeight(memberDepth, fixedPitch);
+  const parameters = {
+    ...draft.parameters,
+    pitch: fixedPitch,
+    fasciaHeight: Math.max(draft.parameters.fasciaHeight, fasciaMinimum),
+  };
   const update = (key: keyof EaveParameters, value: number): void => {
     onChange({ ...draft, parameters: { ...parameters, [key]: value } });
   };
   const changeSystem = (systemType: RoofSystemType): void => {
-    onChange({ ...draft, systemType, parameters: { ...DEFAULT_EAVE_PARAMETERS, pitch: parameters.pitch } });
+    onChange({ ...draft, systemType, parameters: { ...DEFAULT_EAVE_PARAMETERS } });
   };
 
   return (
@@ -337,7 +343,6 @@ export function EaveDetailEditor({ draft, onChange, onCancel, onSave, saveLabel 
               </> : null}
               {isRaisedHeel ? <Slider label="Heel height" min={6} max={30} step={0.25} unit="in" value={parameters.heelHeight} onChange={(value) => update("heelHeight", value)} /> : null}
               {!isRafter && !isRaisedHeel ? <Slider label="Top chord depth" min={3.5} max={11.875} step={0.125} unit="in" value={parameters.topChordDepth} onChange={(value) => update("topChordDepth", value)} /> : null}
-              <Slider label="Roof slope" min={2} max={14} step={0.25} unit=":12" value={parameters.pitch} onChange={(value) => update("pitch", value)} />
             </div>
             <div className="eave-editor-section independent">
               <div className="eave-editor-section-label"><span>Independent</span><small>Does not move spring point</small></div>
