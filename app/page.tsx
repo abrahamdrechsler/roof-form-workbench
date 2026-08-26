@@ -2724,7 +2724,7 @@ export default function Home() {
         roofEdges.map((edge) => [edge.index, bearingRunForEdge(edge)]),
       );
       // `roofBase` is the bearing elevation at the wall line. The solved roof
-      // facets are the structural underside, extended outward to the authored
+      // surfaces are the structural underside, extended outward to the authored
       // roof boundary. Rafter depth is added above these fixed bearing planes.
       const structuralUndersideElevationForEdge = (
         edge: (typeof roofEdges)[number],
@@ -2841,7 +2841,6 @@ export default function Home() {
         return {
           edge,
           hasRaisedTransitions: hasTransitions,
-          needsTriangulation: hasTransitions,
           points,
           ownedPoints: hasTransitions ? [points[1], points[2]] : points,
         };
@@ -2881,7 +2880,6 @@ export default function Home() {
           edge,
           points,
           hasRaisedTransitions,
-          needsTriangulation,
           ownedPoints,
         }) => {
         const edgeMidpoint = midpoint(edge.start, edge.end);
@@ -2917,7 +2915,6 @@ export default function Home() {
           edge,
           points,
           hasRaisedTransitions,
-          needsTriangulation,
           runsAlongRidge,
           ownedPoints,
           mainTargets,
@@ -2956,110 +2953,45 @@ export default function Home() {
           appendPoint(next.points[1]);
         }
 
-        const facets: { index: number; points: Point3[] }[] = [];
-        if (definition.mainTargets.length === 1) {
-          for (let pointIndex = 0; pointIndex < outerBoundary.length - 1; pointIndex += 1) {
-            const segmentChangesElevation =
-              Math.abs(
-                outerBoundary[pointIndex].y -
-                  outerBoundary[pointIndex + 1].y,
-              ) > 0.0001;
-            const ownerIndex = segmentChangesElevation
-              ? pointIndex === 0
-                ? previous.edge.index
-                : next.edge.index
-              : definition.edge.index;
-            facets.push({
-              index: ownerIndex,
-              points: [
-                outerBoundary[pointIndex],
-                outerBoundary[pointIndex + 1],
-                definition.mainTargets[0],
-              ],
-            });
-          }
-        } else {
-          const endTarget = definition.mainTargets[0];
-          const startTarget = definition.mainTargets[1];
-          const startsWithJog =
-            outerBoundary.length > 2 &&
-            Math.abs(outerBoundary[0].y - outerBoundary[1].y) > 0.0001;
-          const endsWithJog =
-            outerBoundary.length > 2 &&
-            Math.abs(
-              outerBoundary[outerBoundary.length - 2].y -
-                outerBoundary[outerBoundary.length - 1].y,
-            ) > 0.0001;
-          if (startsWithJog) {
-            facets.push({
-              index: previous.edge.index,
-              points: [outerBoundary[0], outerBoundary[1], startTarget],
-            });
-          }
-          const mainOuterBoundary = outerBoundary.slice(
-            startsWithJog ? 1 : 0,
-            endsWithJog ? -1 : undefined,
-          );
-          if (mainOuterBoundary.length >= 2) {
-            facets.push({
-              index: definition.edge.index,
-              points: [...mainOuterBoundary, endTarget, startTarget],
-            });
-          }
-          if (endsWithJog) {
-            facets.push({
-              index: next.edge.index,
-              points: [
-                outerBoundary[outerBoundary.length - 2],
-                outerBoundary[outerBoundary.length - 1],
-                endTarget,
-              ],
-            });
-          }
-        }
-
         return {
           index: definition.edge.index,
           points: [...outerBoundary, ...definition.mainTargets],
-          facets,
-          hasTransitions:
-            previous.hasRaisedTransitions ||
-            definition.hasRaisedTransitions ||
-            next.hasRaisedTransitions ||
-            definition.needsTriangulation,
         };
       });
-      const roofFacets = faces.flatMap((face) => face.facets);
+      // Roof topology follows the authored boundary: one continuous surface
+      // per roof edge. A bearing offset may warp that surface, but it must not
+      // create additional architectural faces or visible diagonal creases.
+      const roofSurfaces = faces.map(({ index, points }) => ({ index, points }));
       const roofBoundaryPoints = edgeProfiles.flatMap(({ points }) => points);
       const displayedRoofHeightAt = (point: Point2) =>
         roofHeightFromFaces(
           point,
-          roofFacets.map((facet) => facet.points),
+          roofSurfaces.map((surface) => surface.points),
         );
       const structuralTops = offsetRoofFacesWatertight(
-        roofFacets.map((facet) => facet.points),
+        roofSurfaces.map((surface) => surface.points),
         roofAssembly.structuralDepthInches / 12,
         roofBoundaryPoints,
         nominalSlope,
       );
       const roofingTops = offsetRoofFacesWatertight(
-        roofFacets.map((facet) => facet.points),
+        roofSurfaces.map((surface) => surface.points),
         (roofAssembly.structuralDepthInches +
           roofAssembly.buildUpThicknessInches) /
           12,
         roofBoundaryPoints,
         nominalSlope,
       );
-      const faceAssemblies = roofFacets.map((facet, index) => ({
-        face: facet,
-        structuralUnderside: facet.points,
+      const faceAssemblies = roofSurfaces.map((surface, index) => ({
+        face: surface,
+        structuralUnderside: surface.points,
         structuralTop: structuralTops[index],
         roofingTop: roofingTops[index],
       }));
       const structuralUndersideHeightAt = (point: Point2) =>
         roofHeightFromFaces(
           point,
-          roofFacets.map((facet) => facet.points),
+          roofSurfaces.map((surface) => surface.points),
         );
       const roofFinishUndersideHeightAt = (point: Point2) =>
         roofHeightFromFaces(point, structuralTops);
@@ -3123,9 +3055,7 @@ export default function Home() {
       const roofSurfaceEdgeStroke = "#171512";
       const roofSurfaceEdgeWidth = 1.35;
 
-      // Draw only real roof-plane boundaries. Facets that share the same edge
-      // owner are coplanar subdivisions used to keep the mesh well formed, so
-      // their common edge must not read as an architectural crease.
+      // Draw only boundaries shared by distinct authored roof surfaces.
       const facetEdges = new Map<
         string,
         {
@@ -3135,9 +3065,9 @@ export default function Home() {
           occurrences: number;
         }
       >();
-      roofFacets.forEach((facet) => {
-        facet.points.forEach((start, pointIndex) => {
-          const end = facet.points[(pointIndex + 1) % facet.points.length];
+      roofSurfaces.forEach((surface) => {
+        surface.points.forEach((start, pointIndex) => {
+          const end = surface.points[(pointIndex + 1) % surface.points.length];
           const startKey = roofPointKey(start);
           const endKey = roofPointKey(end);
           const key =
@@ -3150,7 +3080,7 @@ export default function Home() {
             normals: [],
             occurrences: 0,
           };
-          edge.normals.push(roofFaceNormal(facet.points));
+          edge.normals.push(roofFaceNormal(surface.points));
           edge.occurrences += 1;
           facetEdges.set(key, edge);
         });
@@ -4843,8 +4773,8 @@ export default function Home() {
                 This eave bearing is independently offset from the shared roof
                 bearing. Its full authored length stays horizontal. Lowering it
                 moves both shared corners and the neighboring side eaves jog
-                down to meet them. Raising it retains the existing short
-                transition facets back to the shared bearing corners.
+                down to meet them. Raising it keeps the neighboring roof
+                surfaces continuous without creating extra roof faces.
               </div>
               <dl className="inspector-data">
                 <div>
