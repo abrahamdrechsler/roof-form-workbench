@@ -49,3 +49,16 @@ test("catalog details and edge assignments share a typed compatibility model", a
   assert.match(editor, /aria-modal="true"/);
   assert.match(editor, /DEFAULT_EAVE_PARAMETERS/);
 });
+
+test("room-owned ceiling keeps framing and finish separate and clips to the roof limit", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+
+  assert.match(page, /roomId: PRIMARY_ROOM\.id/);
+  assert.match(page, /CEILING_FRAMING_THICKNESS_INCHES = 3\.5/);
+  assert.match(page, /CEILING_FINISH_THICKNESS_INCHES = 0\.5/);
+  assert.match(page, /Bottom of ceiling framing/);
+  assert.match(page, /pointInPlanPolygon\(cellCenter, wallPoints\)/);
+  assert.match(page, /Math\.min\(framingBottom, roofSurfaceAt\(point\)/);
+  assert.match(page, /Math\.min\([\s\S]*framingBottom \+ framingThickness,[\s\S]*roofSurfaceAt\(point\)/);
+  assert.match(page, /finishThicknessInches\.toFixed\(1\)/);
+});

@@ -20,6 +20,18 @@ type EaveDriver = "heel" | "seat";
 type Point2 = { x: number; z: number };
 type Point3 = { x: number; y: number; z: number };
 type ScreenPoint = { x: number; y: number };
+type DepthPoint = ScreenPoint & { depth: number };
+type DepthSurface = {
+  points: DepthPoint[];
+  fill: string;
+  stroke: string;
+  lineWidth: number;
+};
+type DepthLine = {
+  points: DepthPoint[];
+  stroke: string;
+  lineWidth: number;
+};
 type EaveCondition = {
   id: string;
   name: string;
@@ -33,8 +45,20 @@ type EdgeRelationship = {
   conditionId: string;
   elevationOffset: number;
 };
+type Room = {
+  id: string;
+  name: string;
+};
+type Ceiling = {
+  id: string;
+  roomId: string;
+  bottomOfFramingElevationFeet: number;
+  framingThicknessInches: number;
+  finishThicknessInches: number;
+};
 type Selection =
   | { kind: "wall"; index: number }
+  | { kind: "ceiling"; id: string }
   | { kind: "roof" }
   | { kind: "roof-edge"; index: number }
   | { kind: "catalog"; id: string }
@@ -53,6 +77,10 @@ const INITIAL_ROOF_POINTS: Point2[] = [
   { x: 16, z: 22 },
   { x: -16, z: 22 },
 ];
+
+const PRIMARY_ROOM: Room = { id: "room-1", name: "Room 1" };
+const CEILING_FRAMING_THICKNESS_INCHES = 3.5;
+const CEILING_FINISH_THICKNESS_INCHES = 0.5;
 
 const INITIAL_EAVE_CONDITIONS: EaveCondition[] = [
   {
@@ -178,6 +206,238 @@ function drawPolygon(
   context.strokeStyle = stroke;
   context.lineWidth = lineWidth;
   context.stroke();
+}
+
+function hexColor(value: string) {
+  const normalized = value.replace("#", "");
+  const expanded =
+    normalized.length === 3
+      ? normalized
+          .split("")
+          .map((character) => `${character}${character}`)
+          .join("")
+      : normalized;
+  const parsed = Number.parseInt(expanded, 16);
+  return {
+    red: (parsed >> 16) & 255,
+    green: (parsed >> 8) & 255,
+    blue: parsed & 255,
+  };
+}
+
+function triangleContainsPoint(
+  point: ScreenPoint,
+  first: ScreenPoint,
+  second: ScreenPoint,
+  third: ScreenPoint,
+) {
+  const sign = (a: ScreenPoint, b: ScreenPoint, c: ScreenPoint) =>
+    (a.x - c.x) * (b.y - c.y) - (b.x - c.x) * (a.y - c.y);
+  const firstSign = sign(point, first, second);
+  const secondSign = sign(point, second, third);
+  const thirdSign = sign(point, third, first);
+  const hasNegative = firstSign < -0.001 || secondSign < -0.001 || thirdSign < -0.001;
+  const hasPositive = firstSign > 0.001 || secondSign > 0.001 || thirdSign > 0.001;
+  return !(hasNegative && hasPositive);
+}
+
+function triangulateDepthPolygon(points: DepthPoint[]) {
+  if (points.length < 3) return [] as [number, number, number][];
+  const signedArea = points.reduce((area, point, index) => {
+    const next = points[(index + 1) % points.length];
+    return area + point.x * next.y - next.x * point.y;
+  }, 0);
+  const orientation = signedArea >= 0 ? 1 : -1;
+  const remaining = points.map((_, index) => index);
+  const triangles: [number, number, number][] = [];
+  let guard = points.length * points.length;
+
+  while (remaining.length > 3 && guard > 0) {
+    guard -= 1;
+    let clipped = false;
+    for (let index = 0; index < remaining.length; index += 1) {
+      const previousIndex =
+        remaining[(index + remaining.length - 1) % remaining.length];
+      const currentIndex = remaining[index];
+      const nextIndex = remaining[(index + 1) % remaining.length];
+      const previous = points[previousIndex];
+      const current = points[currentIndex];
+      const next = points[nextIndex];
+      const cross =
+        (current.x - previous.x) * (next.y - previous.y) -
+        (current.y - previous.y) * (next.x - previous.x);
+      if (cross * orientation <= 0.001) continue;
+      const containsVertex = remaining.some((candidateIndex) => {
+        if (
+          candidateIndex === previousIndex ||
+          candidateIndex === currentIndex ||
+          candidateIndex === nextIndex
+        ) {
+          return false;
+        }
+        return triangleContainsPoint(
+          points[candidateIndex],
+          previous,
+          current,
+          next,
+        );
+      });
+      if (containsVertex) continue;
+      triangles.push([previousIndex, currentIndex, nextIndex]);
+      remaining.splice(index, 1);
+      clipped = true;
+      break;
+    }
+    if (!clipped) break;
+  }
+
+  if (remaining.length === 3) {
+    triangles.push([remaining[0], remaining[1], remaining[2]]);
+  }
+  if (!triangles.length) {
+    for (let index = 1; index < points.length - 1; index += 1) {
+      triangles.push([0, index, index + 1]);
+    }
+  }
+  return triangles;
+}
+
+function renderDepthScene(
+  context: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  width: number,
+  height: number,
+  surfaces: DepthSurface[],
+  lines: DepthLine[],
+) {
+  const rasterWidth = Math.max(1, Math.ceil(width));
+  const rasterHeight = Math.max(1, Math.ceil(height));
+  const layer = document.createElement("canvas");
+  layer.width = rasterWidth;
+  layer.height = rasterHeight;
+  const layerContext = layer.getContext("2d");
+  if (!layerContext) return;
+  const image = layerContext.createImageData(rasterWidth, rasterHeight);
+  const depthBuffer = new Float32Array(rasterWidth * rasterHeight);
+  depthBuffer.fill(Number.NEGATIVE_INFINITY);
+
+  const writePixel = (
+    x: number,
+    y: number,
+    depth: number,
+    color: { red: number; green: number; blue: number },
+    updateDepth: boolean,
+  ) => {
+    if (x < 0 || y < 0 || x >= rasterWidth || y >= rasterHeight) return;
+    const pixelIndex = y * rasterWidth + x;
+    if (depth < depthBuffer[pixelIndex] - 0.025) return;
+    if (updateDepth) depthBuffer[pixelIndex] = depth;
+    const colorIndex = pixelIndex * 4;
+    image.data[colorIndex] = color.red;
+    image.data[colorIndex + 1] = color.green;
+    image.data[colorIndex + 2] = color.blue;
+    image.data[colorIndex + 3] = 255;
+  };
+
+  surfaces.forEach((surface) => {
+    const color = hexColor(surface.fill);
+    triangulateDepthPolygon(surface.points).forEach((triangle) => {
+      const first = surface.points[triangle[0]];
+      const second = surface.points[triangle[1]];
+      const third = surface.points[triangle[2]];
+      const minimumX = Math.max(
+        0,
+        Math.floor(Math.min(first.x, second.x, third.x)),
+      );
+      const maximumX = Math.min(
+        rasterWidth - 1,
+        Math.ceil(Math.max(first.x, second.x, third.x)),
+      );
+      const minimumY = Math.max(
+        0,
+        Math.floor(Math.min(first.y, second.y, third.y)),
+      );
+      const maximumY = Math.min(
+        rasterHeight - 1,
+        Math.ceil(Math.max(first.y, second.y, third.y)),
+      );
+      const denominator =
+        (second.y - third.y) * (first.x - third.x) +
+        (third.x - second.x) * (first.y - third.y);
+      if (Math.abs(denominator) < 0.00001) return;
+      for (let y = minimumY; y <= maximumY; y += 1) {
+        for (let x = minimumX; x <= maximumX; x += 1) {
+          const sampleX = x + 0.5;
+          const sampleY = y + 0.5;
+          const firstWeight =
+            ((second.y - third.y) * (sampleX - third.x) +
+              (third.x - second.x) * (sampleY - third.y)) /
+            denominator;
+          const secondWeight =
+            ((third.y - first.y) * (sampleX - third.x) +
+              (first.x - third.x) * (sampleY - third.y)) /
+            denominator;
+          const thirdWeight = 1 - firstWeight - secondWeight;
+          if (
+            firstWeight < -0.001 ||
+            secondWeight < -0.001 ||
+            thirdWeight < -0.001
+          ) {
+            continue;
+          }
+          const depth =
+            first.depth * firstWeight +
+            second.depth * secondWeight +
+            third.depth * thirdWeight;
+          writePixel(x, y, depth, color, true);
+        }
+      }
+    });
+  });
+
+  const renderLine = (line: DepthLine) => {
+    const color = hexColor(line.stroke);
+    line.points.slice(1).forEach((end, index) => {
+      const start = line.points[index];
+      const distance = Math.hypot(end.x - start.x, end.y - start.y);
+      const steps = Math.max(1, Math.ceil(distance * 1.5));
+      const radius = Math.max(0.75, line.lineWidth / 2);
+      for (let step = 0; step <= steps; step += 1) {
+        const amount = step / steps;
+        const centerX = start.x + (end.x - start.x) * amount;
+        const centerY = start.y + (end.y - start.y) * amount;
+        const depth = start.depth + (end.depth - start.depth) * amount;
+        const minimumX = Math.floor(centerX - radius);
+        const maximumX = Math.ceil(centerX + radius);
+        const minimumY = Math.floor(centerY - radius);
+        const maximumY = Math.ceil(centerY + radius);
+        for (let y = minimumY; y <= maximumY; y += 1) {
+          for (let x = minimumX; x <= maximumX; x += 1) {
+            if (Math.hypot(x + 0.5 - centerX, y + 0.5 - centerY) > radius) {
+              continue;
+            }
+            writePixel(x, y, depth, color, false);
+          }
+        }
+      }
+    });
+  };
+
+  surfaces.forEach((surface) => {
+    renderLine({
+      points: [...surface.points, surface.points[0]],
+      stroke: surface.stroke,
+      lineWidth: surface.lineWidth,
+    });
+  });
+  lines.forEach(renderLine);
+
+  layerContext.putImageData(image, 0, 0);
+  context.save();
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.imageSmoothingEnabled = true;
+  context.drawImage(layer, 0, 0, canvas.width, canvas.height);
+  context.restore();
 }
 
 function pointInPolygon(point: ScreenPoint, polygon: ScreenPoint[]) {
@@ -310,6 +570,15 @@ export default function Home() {
   const [pitch, setPitch] = useState(6);
   const [roofKind, setRoofKind] = useState<RoofKind>("hip");
   const [roofSystemType, setRoofSystemType] = useState<RoofSystemType>("rafter");
+  const [ceiling, setCeiling] = useState<Ceiling>({
+    id: "ceiling-1",
+    roomId: PRIMARY_ROOM.id,
+    bottomOfFramingElevationFeet: 9,
+    framingThicknessInches: CEILING_FRAMING_THICKNESS_INCHES,
+    finishThicknessInches: CEILING_FINISH_THICKNESS_INCHES,
+  });
+  const [ceilingHeightDraft, setCeilingHeightDraft] = useState("9.00");
+  const [showCeiling, setShowCeiling] = useState(true);
   const [selection, setSelection] = useState<Selection>(null);
   const [pointerWorld, setPointerWorld] = useState<Point2 | null>(null);
   const [wallHeightDraft, setWallHeightDraft] = useState("9.00");
@@ -357,6 +626,7 @@ export default function Home() {
     { index: number; points: ScreenPoint[] }[]
   >([]);
   const formRoofRegions = useRef<ScreenPoint[][]>([]);
+  const formCeilingRegions = useRef<ScreenPoint[][]>([]);
   const orbitDrag = useRef<{
     pointerId: number;
     x: number;
@@ -466,6 +736,15 @@ export default function Home() {
     setPitch(6);
     setRoofKind("hip");
     setRoofSystemType("rafter");
+    setCeiling({
+      id: "ceiling-1",
+      roomId: PRIMARY_ROOM.id,
+      bottomOfFramingElevationFeet: 9,
+      framingThicknessInches: CEILING_FRAMING_THICKNESS_INCHES,
+      finishThicknessInches: CEILING_FINISH_THICKNESS_INCHES,
+    });
+    setCeilingHeightDraft("9.00");
+    setShowCeiling(true);
     setRelationships(
       INITIAL_ROOF_POINTS.map(() => ({
         conditionId: "rafter-seat",
@@ -738,6 +1017,33 @@ export default function Home() {
       context.stroke();
     }
 
+    if (showCeiling && wallsClosed && wallPoints.length >= 3) {
+      const selected = selection?.kind === "ceiling";
+      drawPolygon(
+        context,
+        wallPoints.map(project),
+        selected ? "rgba(38, 127, 103, 0.20)" : "rgba(38, 127, 103, 0.08)",
+        selected ? "#267f67" : "rgba(38, 127, 103, 0.45)",
+        selected ? 2.5 : 1.25,
+      );
+      const roomCenter = wallPoints.reduce(
+        (result, point) => ({
+          x: result.x + point.x / wallPoints.length,
+          z: result.z + point.z / wallPoints.length,
+        }),
+        { x: 0, z: 0 },
+      );
+      const label = project(roomCenter);
+      context.fillStyle = selected ? "#175c4c" : "#267f67";
+      context.font = "700 8px monospace";
+      context.textAlign = "center";
+      context.fillText(
+        `CEILING · ${feetInches(ceiling.bottomOfFramingElevationFeet)}`,
+        label.x,
+        label.y + 3,
+      );
+    }
+
     if (roofPoints.length >= 3 && roofClosed) {
       drawPolygon(
         context,
@@ -866,13 +1172,16 @@ export default function Home() {
     context.fillText("12″ × 12″ SNAP GRID", 14, 22);
   }, [
     command,
+    ceiling.bottomOfFramingElevationFeet,
     pointerWorld,
     roofClosed,
     roofEdges,
     roofPoints,
     selection,
+    showCeiling,
     wallHeights,
     wallPoints,
+    wallsClosed,
     walls,
   ]);
 
@@ -916,6 +1225,25 @@ export default function Home() {
             Math.cos(cameraPitch),
       };
     };
+    const depthProject = (point: Point3): DepthPoint => {
+      const projected = project(point);
+      const localX = point.x - (center.x + formFocusOffset.x);
+      const localZ = point.z - (center.z + formFocusOffset.z);
+      const planDepth = localX * Math.sin(yaw) + localZ * Math.cos(yaw);
+      return {
+        ...projected,
+        depth:
+          planDepth * Math.cos(cameraPitch) +
+          (point.y - (pivotY + formFocusOffset.y)) * Math.sin(cameraPitch),
+      };
+    };
+    const depthSurfaces: DepthSurface[] = [];
+    const depthLines: DepthLine[] = [];
+    const eaveMarkers: {
+      point: ScreenPoint;
+      selected: boolean;
+    }[] = [];
+    let ceilingOutline: ScreenPoint[] = [];
 
     context.fillStyle = "#fbfaf7";
     context.fillRect(0, 0, width, height);
@@ -1030,6 +1358,139 @@ export default function Home() {
       return localBase + Math.max(0, nearestEdge?.distance ?? 0) * slope;
     };
 
+    formCeilingRegions.current = [];
+    if (showCeiling && wallsClosed && wallPoints.length >= 3) {
+      const roomBounds = wallPoints.reduce(
+        (result, point) => ({
+          minX: Math.min(result.minX, point.x),
+          maxX: Math.max(result.maxX, point.x),
+          minZ: Math.min(result.minZ, point.z),
+          maxZ: Math.max(result.maxZ, point.z),
+        }),
+        {
+          minX: Number.POSITIVE_INFINITY,
+          maxX: Number.NEGATIVE_INFINITY,
+          minZ: Number.POSITIVE_INFINITY,
+          maxZ: Number.NEGATIVE_INFINITY,
+        },
+      );
+      const framingBottom = ceiling.bottomOfFramingElevationFeet;
+      const framingThickness = ceiling.framingThicknessInches / 12;
+      const finishThickness = ceiling.finishThicknessInches / 12;
+      const selectedCeiling = selection?.kind === "ceiling";
+      const subdivisions = 16;
+      const cellWidth = (roomBounds.maxX - roomBounds.minX) / subdivisions;
+      const cellDepth = (roomBounds.maxZ - roomBounds.minZ) / subdivisions;
+      const clippedBottomAt = (point: Point2) =>
+        Math.min(framingBottom, roofSurfaceAt(point) ?? framingBottom);
+      const clippedTopAt = (point: Point2) => {
+        const bottom = clippedBottomAt(point);
+        return Math.max(
+          bottom,
+          Math.min(
+            framingBottom + framingThickness,
+            roofSurfaceAt(point) ?? framingBottom + framingThickness,
+          ),
+        );
+      };
+
+      for (let xIndex = 0; xIndex < subdivisions; xIndex += 1) {
+        for (let zIndex = 0; zIndex < subdivisions; zIndex += 1) {
+          const x0 = roomBounds.minX + xIndex * cellWidth;
+          const x1 = roomBounds.minX + (xIndex + 1) * cellWidth;
+          const z0 = roomBounds.minZ + zIndex * cellDepth;
+          const z1 = roomBounds.minZ + (zIndex + 1) * cellDepth;
+          const cellCenter = { x: (x0 + x1) / 2, z: (z0 + z1) / 2 };
+          if (!pointInPlanPolygon(cellCenter, wallPoints)) continue;
+          const corners: Point2[] = [
+            { x: x0, z: z0 },
+            { x: x1, z: z0 },
+            { x: x1, z: z1 },
+            { x: x0, z: z1 },
+          ];
+          const framingTop = corners.map((point) => ({
+            ...point,
+            y: clippedTopAt(point),
+          }));
+          const framingUnderside = corners.map((point) => ({
+            ...point,
+            y: clippedBottomAt(point),
+          }));
+          const finishUnderside = corners.map((point) => ({
+            ...point,
+            y: clippedBottomAt(point) - finishThickness,
+          }));
+          const topFill = selectedCeiling
+            ? (xIndex + zIndex) % 2 === 0
+              ? "#6bb49e"
+              : "#75bea8"
+            : (xIndex + zIndex) % 2 === 0
+              ? "#8fbdad"
+              : "#99c7b7";
+          depthSurfaces.push({
+            points: framingTop.map(depthProject),
+            fill: topFill,
+            stroke: selectedCeiling ? "#267f67" : "#709487",
+            lineWidth: selectedCeiling ? 1.15 : 0.45,
+          });
+          depthSurfaces.push({
+            points: [...finishUnderside].reverse().map(depthProject),
+            fill: selectedCeiling ? "#e9e2d5" : "#e1dbd0",
+            stroke: selectedCeiling ? "#267f67" : "#aaa399",
+            lineWidth: selectedCeiling ? 1 : 0.35,
+          });
+          formCeilingRegions.current.push(framingUnderside.map(project));
+        }
+      }
+
+      walls.forEach((wall) => {
+        const samples = Array.from({ length: 13 }, (_, index) => {
+          const amount = index / 12;
+          const point = {
+            x: wall.start.x + (wall.end.x - wall.start.x) * amount,
+            z: wall.start.z + (wall.end.z - wall.start.z) * amount,
+          };
+          return {
+            point,
+            bottom: clippedBottomAt(point),
+            top: clippedTopAt(point),
+          };
+        });
+        const framingEdge = [
+          ...samples.map(({ point, top }) => ({ ...point, y: top })),
+          ...samples
+            .slice()
+            .reverse()
+            .map(({ point, bottom }) => ({ ...point, y: bottom })),
+        ];
+        const finishEdge = [
+          ...samples.map(({ point, bottom }) => ({ ...point, y: bottom })),
+          ...samples
+            .slice()
+            .reverse()
+            .map(({ point, bottom }) => ({
+              ...point,
+              y: bottom - finishThickness,
+            })),
+        ];
+        depthSurfaces.push({
+          points: framingEdge.map(depthProject),
+          fill: selectedCeiling ? "#4d9a82" : "#789f91",
+          stroke: selectedCeiling ? "#175c4c" : "#647e75",
+          lineWidth: selectedCeiling ? 1.5 : 0.75,
+        });
+        depthSurfaces.push({
+          points: finishEdge.map(depthProject),
+          fill: "#e7e0d5",
+          stroke: selectedCeiling ? "#267f67" : "#a8a095",
+          lineWidth: selectedCeiling ? 1.25 : 0.6,
+        });
+      });
+      ceilingOutline = wallPoints.map((point) =>
+        project({ x: point.x, y: clippedBottomAt(point), z: point.z }),
+      );
+    }
+
     formWallRegions.current = [];
     if (showWalls) {
       const orderedWalls = [...walls].sort((a, b) => {
@@ -1068,13 +1529,12 @@ export default function Home() {
         formWallRegions.current.push({ index: wall.index, points: projected });
         const selectedWall =
           selection?.kind === "wall" && selection.index === wall.index;
-        drawPolygon(
-          context,
-          projected,
-          selectedWall ? "#d7e7e5" : "#ded9cf",
-          selectedWall ? "#16838a" : "#aaa399",
-          selectedWall ? 2.5 : 1,
-        );
+        depthSurfaces.push({
+          points: face.map(depthProject),
+          fill: selectedWall ? "#d7e7e5" : "#ded9cf",
+          stroke: selectedWall ? "#16838a" : "#aaa399",
+          lineWidth: selectedWall ? 2.5 : 1,
+        });
       });
     }
 
@@ -1111,10 +1571,10 @@ export default function Home() {
         x: (bounds.minX + bounds.maxX) / 2,
         z: (bounds.minZ + bounds.maxZ) / 2,
       };
-      const width = bounds.maxX - bounds.minX;
-      const depth = bounds.maxZ - bounds.minZ;
+      const roofWidth = bounds.maxX - bounds.minX;
+      const roofDepth = bounds.maxZ - bounds.minZ;
       const nominalSlope = Math.max(0.01, pitch / 12);
-      const shortSpan = Math.min(width, depth);
+      const shortSpan = Math.min(roofWidth, roofDepth);
       const ridgeInset = shortSpan / 2;
       const rise = Math.max(0.25, ridgeInset * nominalSlope);
       const ridgeA: Point3 = dominantX
@@ -1388,28 +1848,15 @@ export default function Home() {
           points: [...outerBoundary, ...definition.mainTargets],
         };
       });
-      faces
-        .sort((a, b) => {
-          const depth = (face: { points: Point3[] }) =>
-            face.points.reduce(
-              (sum, point) =>
-                sum +
-                (point.x - center.x) * Math.sin(yaw) +
-                (point.z - center.z) * Math.cos(yaw),
-              0,
-            ) / face.points.length;
-          return depth(a) - depth(b);
-        })
-        .forEach((face) => {
+      faces.forEach((face) => {
           const selectedEdge =
             selection?.kind === "roof-edge" &&
             selection.index === face.index;
           const projectedFace = face.points.map(project);
           formRoofRegions.current.push(projectedFace);
-          drawPolygon(
-            context,
-            projectedFace,
-            selectedEdge
+          depthSurfaces.push({
+            points: face.points.map(depthProject),
+            fill: selectedEdge
               ? "#d97834"
               : selection?.kind === "roof"
                 ? face.index % 2
@@ -1418,20 +1865,17 @@ export default function Home() {
               : face.index % 2
                 ? "#ef9e67"
                 : "#df8347",
-            selectedEdge ? "#171512" : "#9b572c",
-            selectedEdge ? 2.5 : 1,
-          );
+            stroke: selectedEdge ? "#171512" : "#9b572c",
+            lineWidth: selectedEdge ? 2.5 : 1,
+          });
         });
 
       if (showTopology && roofKind !== "shed") {
-        context.strokeStyle = "#63371f";
-        context.lineWidth = 1.5;
-        const start = project(ridgeA);
-        const end = project(ridgeB);
-        context.beginPath();
-        context.moveTo(start.x, start.y);
-        context.lineTo(end.x, end.y);
-        context.stroke();
+        depthLines.push({
+          points: [depthProject(ridgeA), depthProject(ridgeB)],
+          stroke: "#63371f",
+          lineWidth: 1.5,
+        });
       }
 
       edgeProfiles.forEach(({ edge, points }) => {
@@ -1442,41 +1886,19 @@ export default function Home() {
         });
         const selectedEdge =
           selection?.kind === "roof-edge" && selection.index === edge.index;
-        context.strokeStyle = selectedEdge ? "#16838a" : "#a95829";
-        context.lineWidth = selectedEdge ? 4 : 2;
-        context.lineCap = "round";
-        context.beginPath();
-        context.moveTo(projectedProfile[0].x, projectedProfile[0].y);
-        projectedProfile.slice(1).forEach((point) => {
-          context.lineTo(point.x, point.y);
+        depthLines.push({
+          points: points.map(depthProject),
+          stroke: selectedEdge ? "#16838a" : "#a95829",
+          lineWidth: selectedEdge ? 4 : 2,
         });
-        context.stroke();
         const middle = {
           x: (projectedProfile[1].x + projectedProfile[2].x) / 2,
           y: (projectedProfile[1].y + projectedProfile[2].y) / 2,
         };
-        context.beginPath();
-        context.arc(
-          middle.x,
-          middle.y,
-          selectedEdge ? 6 : 3.5,
-          0,
-          Math.PI * 2,
-        );
-        context.fillStyle = selectedEdge ? "#16838a" : "#fff";
-        context.fill();
-        context.strokeStyle = selectedEdge ? "#16838a" : "#a95829";
-        context.lineWidth = 1.25;
-        context.stroke();
+        eaveMarkers.push({ point: middle, selected: selectedEdge });
       });
 
       walls.forEach((wall) => {
-        const wallMidpoint = midpoint(wall.start, wall.end);
-        const wallDepth =
-          (wallMidpoint.x - center.x) * Math.sin(yaw) +
-          (wallMidpoint.z - center.z) * Math.cos(yaw);
-        if (wallDepth < -0.01) return;
-
         const wallHeight = wallHeights[wall.index] ?? 9;
         const selectedWall =
           selection?.kind === "wall" && selection.index === wall.index;
@@ -1507,37 +1929,48 @@ export default function Home() {
 
         groups.forEach((group) => {
           if (group.length < 2) return;
-          const intersection = group.map(({ point, roofHeight }) =>
-            project({ x: point.x, y: roofHeight, z: point.z }),
-          );
-
-          if (!clipWalls) {
-            const top = [...group]
-              .reverse()
-              .map(({ point }) =>
-                project({ x: point.x, y: wallHeight, z: point.z }),
-              );
-            drawPolygon(
-              context,
-              [...intersection, ...top],
-              selectedWall
-                ? "rgba(22, 131, 138, 0.20)"
-                : "rgba(222, 217, 207, 0.96)",
-              selectedWall ? "#16838a" : "#8f887f",
-              selectedWall ? 2.5 : 1.25,
-            );
-          }
-
-          context.strokeStyle = selectedWall ? "#08767e" : "#625b53";
-          context.lineWidth = selectedWall ? 3 : 2;
-          context.lineCap = "round";
-          context.beginPath();
-          context.moveTo(intersection[0].x, intersection[0].y);
-          intersection
-            .slice(1)
-            .forEach((point) => context.lineTo(point.x, point.y));
-          context.stroke();
+          depthLines.push({
+            points: group.map(({ point, roofHeight }) =>
+              depthProject({ x: point.x, y: roofHeight, z: point.z }),
+            ),
+            stroke: selectedWall ? "#08767e" : "#625b53",
+            lineWidth: selectedWall ? 3 : 2,
+          });
         });
+      });
+
+      renderDepthScene(
+        context,
+        canvas,
+        width,
+        height,
+        depthSurfaces,
+        depthLines,
+      );
+
+      if (selection?.kind === "ceiling" && ceilingOutline.length >= 3) {
+        context.save();
+        context.setLineDash([7, 5]);
+        context.strokeStyle = "#175c4c";
+        context.lineWidth = 2.5;
+        context.beginPath();
+        context.moveTo(ceilingOutline[0].x, ceilingOutline[0].y);
+        ceilingOutline.slice(1).forEach((point) =>
+          context.lineTo(point.x, point.y),
+        );
+        context.closePath();
+        context.stroke();
+        context.restore();
+      }
+
+      eaveMarkers.forEach(({ point, selected }) => {
+        context.beginPath();
+        context.arc(point.x, point.y, selected ? 6 : 3.5, 0, Math.PI * 2);
+        context.fillStyle = selected ? "#16838a" : "#fff";
+        context.fill();
+        context.strokeStyle = selected ? "#16838a" : "#a95829";
+        context.lineWidth = 1.25;
+        context.stroke();
       });
 
       if (showDatums) {
@@ -1550,6 +1983,14 @@ export default function Home() {
         );
       }
     } else {
+      renderDepthScene(
+        context,
+        canvas,
+        width,
+        height,
+        depthSurfaces,
+        depthLines,
+      );
       setEaveHandlePosition((current) => (current ? null : current));
       context.fillStyle = "#a95829";
       context.font = "700 10px monospace";
@@ -1558,6 +1999,7 @@ export default function Home() {
   }, [
     center.x,
     center.z,
+    ceiling,
     clipWalls,
     edgeElevation,
     formFocusOffset,
@@ -1570,11 +2012,13 @@ export default function Home() {
     roofKind,
     roofPoints,
     selection,
+    showCeiling,
     showDatums,
     showTopology,
     showWalls,
     wallHeights,
     wallPoints,
+    wallsClosed,
     walls,
   ]);
 
@@ -1666,6 +2110,16 @@ export default function Home() {
       setWallHeightDraft((wallHeights[wallHit.index] ?? 9).toFixed(2));
     } else if (roofHit && roofHit.distance <= 1) {
       setSelection({ kind: "roof-edge", index: roofHit.index });
+    } else if (
+      showCeiling &&
+      wallsClosed &&
+      wallPoints.length >= 3 &&
+      pointInPlanPolygon(point, wallPoints)
+    ) {
+      setSelection({ kind: "ceiling", id: ceiling.id });
+      setCeilingHeightDraft(
+        ceiling.bottomOfFramingElevationFeet.toFixed(2),
+      );
     } else if (roofClosed && pointInPlanPolygon(point, roofPoints)) {
       setSelection({ kind: "roof" });
     } else {
@@ -1691,6 +2145,25 @@ export default function Home() {
     selection?.kind === "catalog"
       ? eaveCatalog.find((condition) => condition.id === selection.id)
       : null;
+  const roomBounds = wallPoints.reduce(
+    (result, point) => ({
+      minX: Math.min(result.minX, point.x),
+      maxX: Math.max(result.maxX, point.x),
+      minZ: Math.min(result.minZ, point.z),
+      maxZ: Math.max(result.maxZ, point.z),
+    }),
+    {
+      minX: Number.POSITIVE_INFINITY,
+      maxX: Number.NEGATIVE_INFINITY,
+      minZ: Number.POSITIVE_INFINITY,
+      maxZ: Number.NEGATIVE_INFINITY,
+    },
+  );
+  const wallsSharePlateHeight =
+    wallHeights.length > 0 &&
+    wallHeights.every(
+      (height) => Math.abs(height - wallHeights[0]) < 0.001,
+    );
 
   return (
     <main className="studio-shell">
@@ -1759,6 +2232,21 @@ export default function Home() {
                 <span>◇</span>
                 <strong>Draw roof</strong>
                 <small>Click the start point to close</small>
+              </button>
+              <button
+                className={selection?.kind === "ceiling" ? "active" : ""}
+                disabled={!wallsClosed || wallPoints.length < 3}
+                onClick={() => {
+                  setCommand("select");
+                  setSelection({ kind: "ceiling", id: ceiling.id });
+                  setCeilingHeightDraft(
+                    ceiling.bottomOfFramingElevationFeet.toFixed(2),
+                  );
+                }}
+              >
+                <span>▱</span>
+                <strong>Select ceiling</strong>
+                <small>{PRIMARY_ROOM.name} · interior wall faces</small>
               </button>
             </div>
             {command !== "select" && (
@@ -1889,6 +2377,11 @@ export default function Home() {
             <ControlHeading number="04" title="View" />
             <Check label="Wall volume" value={showWalls} onChange={setShowWalls} />
             <Check
+              label="Ceiling assembly"
+              value={showCeiling}
+              onChange={setShowCeiling}
+            />
+            <Check
               label="Construction datums"
               value={showDatums}
               onChange={setShowDatums}
@@ -1920,6 +2413,9 @@ export default function Home() {
                   </span>
                   <span>
                     <i className="legend-line roof" /> Roof boundary
+                  </span>
+                  <span>
+                    <i className="legend-line ceiling" /> Ceiling
                   </span>
                 </div>
               }
@@ -1992,6 +2488,16 @@ export default function Home() {
                     setSelection({ kind: "wall", index: wall.index });
                     setWallHeightDraft(
                       (wallHeights[wall.index] ?? 9).toFixed(2),
+                    );
+                    return;
+                  }
+                  const ceilingRegion = [...formCeilingRegions.current]
+                    .reverse()
+                    .find((region) => pointInPolygon(pointer, region));
+                  if (ceilingRegion) {
+                    setSelection({ kind: "ceiling", id: ceiling.id });
+                    setCeilingHeightDraft(
+                      ceiling.bottomOfFramingElevationFeet.toFixed(2),
                     );
                     return;
                   }
@@ -2226,7 +2732,90 @@ export default function Home() {
         </section>
 
         <aside className="detail-inspector">
-          {selection?.kind === "wall" ? (
+          {selection?.kind === "ceiling" ? (
+            <>
+              <InspectorHeader
+                label="SELECTED ROOM CEILING"
+                title={`${PRIMARY_ROOM.name} ceiling`}
+                onClose={() => setSelection(null)}
+              />
+              <div className="inspector-selection-summary">
+                <span>Owned by {PRIMARY_ROOM.name}</span>
+                <strong>
+                  {feetInches(roomBounds.maxX - roomBounds.minX)} ×{" "}
+                  {feetInches(roomBounds.maxZ - roomBounds.minZ)}
+                </strong>
+              </div>
+              <div className="detail-form inspector-properties">
+                <label>
+                  <span>Bottom of ceiling framing</span>
+                  <div className="height-input">
+                    <input
+                      type="number"
+                      min={4}
+                      max={30}
+                      step={0.25}
+                      value={ceilingHeightDraft}
+                      onChange={(event) => {
+                        setCeilingHeightDraft(event.target.value);
+                        const value = Number(event.target.value);
+                        if (Number.isFinite(value) && value >= 4 && value <= 30) {
+                          setCeiling((current) => ({
+                            ...current,
+                            bottomOfFramingElevationFeet: value,
+                          }));
+                        }
+                      }}
+                    />
+                    <span>ft</span>
+                  </div>
+                </label>
+                <Range
+                  label="Ceiling height"
+                  value={ceiling.bottomOfFramingElevationFeet}
+                  min={4}
+                  max={30}
+                  step={0.25}
+                  output={feetInches(ceiling.bottomOfFramingElevationFeet)}
+                  onChange={(value) => {
+                    setCeiling((current) => ({
+                      ...current,
+                      bottomOfFramingElevationFeet: value,
+                    }));
+                    setCeilingHeightDraft(value.toFixed(2));
+                  }}
+                />
+              </div>
+              <div className="detail-inspector-note">
+                The flat datum is the bottom of framing. Where it meets the
+                roof, perimeter cells fold to the solved roof face instead of
+                extruding through it. The ceiling follows this room’s interior
+                wall-face footprint automatically.
+              </div>
+              <dl className="inspector-data">
+                <div>
+                  <dt>Structural framing</dt>
+                  <dd>{ceiling.framingThicknessInches.toFixed(1)}″ upward</dd>
+                </div>
+                <div>
+                  <dt>Separate finish</dt>
+                  <dd>{ceiling.finishThicknessInches.toFixed(1)}″ below</dd>
+                </div>
+                <div>
+                  <dt>Roof clipping limit</dt>
+                  <dd>Solved top-of-framing face</dd>
+                </div>
+                <div>
+                  <dt>Default datum</dt>
+                  <dd>
+                    {wallsSharePlateHeight
+                      ? `Shared plate · ${feetInches(wallHeights[0])}`
+                      : "Explicit · wall plates differ"}
+                  </dd>
+                </div>
+              </dl>
+            </>
+          ) : selection?.kind === "wall" ? (
             <>
               <InspectorHeader
                 label="SELECTED WALL SEGMENT"
@@ -2505,10 +3094,11 @@ export default function Home() {
                 <i />
                 <b />
               </div>
-              <h2>Walls and roof are independent</h2>
+              <h2>Room, ceiling, and roof are coordinated</h2>
               <p>
-                Draw either path, then select the roof, a wall, or an edge to
-                edit its independent properties.
+                The room owns a ceiling whose footprint follows the interior
+                wall faces. Select the ceiling, roof, a wall, or an edge to edit
+                its properties.
               </p>
               <dl className="model-counts">
                 <div>
@@ -2518,6 +3108,10 @@ export default function Home() {
                 <div>
                   <dt>Roof edges</dt>
                   <dd>{roofEdges.length}</dd>
+                </div>
+                <div>
+                  <dt>Ceilings</dt>
+                  <dd>{wallsClosed && wallPoints.length >= 3 ? 1 : 0}</dd>
                 </div>
                 <div>
                   <dt>Clip walls</dt>
@@ -2537,11 +3131,12 @@ export default function Home() {
             : "Roof boundary must close on its first point"}
         </span>
         <span>
-          {walls.length} walls · {roofEdges.length} roof edges
+          {walls.length} walls · {roofEdges.length} roof edges ·{" "}
+          {wallsClosed && wallPoints.length >= 3 ? 1 : 0} ceiling
         </span>
         <span>
-          Roof base {feetInches(roofBase)} · wall clipping{" "}
-          {clipWalls ? "on" : "off"}
+          Roof base {feetInches(roofBase)} · ceiling framing bottom{" "}
+          {feetInches(ceiling.bottomOfFramingElevationFeet)}
         </span>
       </footer>
       {detailEditor !== null ? (

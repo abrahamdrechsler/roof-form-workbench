@@ -238,6 +238,11 @@ p {
   box-shadow: inset 3px 0 0 var(--teal);
 }
 
+.command-picker > button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .command-picker > button.roof-command {
   background: #fff8f2;
   border-color: var(--orange);
@@ -781,6 +786,10 @@ input[type="range"] {
 
 .legend-line.roof {
   background: var(--orange);
+}
+
+.legend-line.ceiling {
+  background: #267f67;
 }
 
 .canvas-wrap {
