@@ -1533,6 +1533,9 @@ export default function Home() {
     setRoofPoints((current) =>
       shiftRoofEdgesByOverhang(current, overhangChanges),
     );
+    if (systemType !== "rafter") {
+      setRoofKind("gable");
+    }
     setRoofSystemType(systemType);
   };
 
@@ -4802,6 +4805,8 @@ export default function Home() {
                   <p>
                     This system governs the whole selected roof. Edge detail
                     assignments remain stored; only matching details are active.
+                    Choosing a truss system automatically uses the supported
+                    Gable roof form.
                   </p>
                 </fieldset>
                 <label>

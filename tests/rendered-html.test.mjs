@@ -46,6 +46,8 @@ test("roof system activates compatible details while edge assignments persist", 
   assert.match(page, /nextDetail\.parameters\.overhang - currentDetail\.parameters\.overhang/);
   assert.doesNotMatch(page, /Independent overhang/);
   assert.match(page, /changeRoofSystem/);
+  assert.match(page, /if \(systemType !== "rafter"\) \{\s+setRoofKind\("gable"\)/);
+  assert.match(page, /Choosing a truss system automatically uses the supported/);
   assert.match(page, /Overall roof structural system/);
   assert.match(page, /This system governs the whole selected roof/);
   assert.match(page, /Assigned · inactive/);
