@@ -217,6 +217,15 @@ test("roof thickness grows upward from fixed wall-bearing geometry", async () =>
   assert.match(page, /neighboring side eaves jog/);
   assert.match(page, /transitionSlopeAtLoweredCorner/);
   assert.match(page, /ridgeElevation - elevation/);
+  assert.match(page, /const maximumEaveElevationForEdge = useCallback/);
+  assert.match(page, /maximumEaveElevationForEdge\(edgeIndex\) - roofBase/);
+  assert.match(page, /max=\{selectedEdgeMaximumElevation\}/);
+  assert.match(page, /At maximum · gable limit/);
+  assert.match(page, /const morphedRidgeEnd =/);
+  assert.match(page, /const resolvedRidgeA = morphedRidgeEnd\(ridgeA\)/);
+  assert.match(page, /length \* 0\.5/);
+  assert.match(page, /Maximum allowed elevation/);
+  assert.doesNotMatch(page, /max=\{40\}/);
   assert.match(page, /updateRoofAssembly/);
   assert.match(page, /rafterDepth: changes\.structuralDepthInches/);
 });

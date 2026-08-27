@@ -1284,6 +1284,33 @@ export default function Home() {
     [relationships, roofBase],
   );
 
+  const maximumEaveElevationForEdge = useCallback(
+    (index: number) => {
+      const edge = roofEdges[index];
+      if (!edge) return roofBase;
+      const datumPoints =
+        wallsClosed && wallPoints.length >= 3 ? wallPoints : roofPoints;
+      if (datumPoints.length < 3) return roofBase;
+      const minX = Math.min(...datumPoints.map((point) => point.x));
+      const maxX = Math.max(...datumPoints.map((point) => point.x));
+      const minZ = Math.min(...datumPoints.map((point) => point.z));
+      const maxZ = Math.max(...datumPoints.map((point) => point.z));
+      const nominalSlope = Math.max(0.01, pitch / 12);
+      const ridgeRise =
+        (Math.min(maxX - minX, maxZ - minZ) / 2) * nominalSlope;
+      const wall = wallUnderRoofEdge(edge, walls);
+      const bearingRun = wall
+        ? pointToSegmentDistance(
+            midpoint(edge.start, edge.end),
+            wall.start,
+            wall.end,
+          )
+        : 0;
+      return roofBase + ridgeRise + bearingRun * nominalSlope;
+    },
+    [pitch, roofBase, roofEdges, roofPoints, wallPoints, walls, wallsClosed],
+  );
+
   const isTrussRoof = roofSystemType !== "rafter";
   const trussWallBounds = useMemo(
     () => axisAlignedRectangleBounds(wallPoints),
@@ -1465,10 +1492,19 @@ export default function Home() {
     edgeIndex: number,
     changes: Partial<EdgeRelationship>,
   ) => {
+    const safeChanges = changes.elevationOffset === undefined
+      ? changes
+      : {
+          ...changes,
+          elevationOffset: Math.min(
+            maximumEaveElevationForEdge(edgeIndex) - roofBase,
+            Math.max(-roofBase, changes.elevationOffset),
+          ),
+        };
     setRelationships((current) =>
       current.map((relationship, index) =>
         index === edgeIndex
-          ? { ...relationship, ...changes }
+          ? { ...relationship, ...safeChanges }
           : relationship,
       ),
     );
@@ -2897,12 +2933,12 @@ export default function Home() {
           z: edge.start.z + (edge.end.z - edge.start.z) * amount,
         });
         const startRun = Math.min(
-          length * 0.45,
+          length * 0.5,
           (eaveElevation - startElevation) /
             transitionSlopeAtLoweredCorner(startElevation),
         );
         const endRun = Math.min(
-          length * 0.45,
+          length * 0.5,
           (eaveElevation - endElevation) /
             transitionSlopeAtLoweredCorner(endElevation),
         );
@@ -2962,16 +2998,50 @@ export default function Home() {
           );
         }
       }
+      const runsAlongRidgeForEdge = (edge: (typeof roofEdges)[number]) =>
+        dominantX
+          ? Math.abs(edge.end.x - edge.start.x) >=
+            Math.abs(edge.end.z - edge.start.z)
+          : Math.abs(edge.end.z - edge.start.z) >=
+            Math.abs(edge.end.x - edge.start.x);
+      const morphedRidgeEnd = (ridgeEnd: Point3) => {
+        if (roofKind !== "hip") return ridgeEnd;
+        const endEdge = roofEdges
+          .filter((edge) => !runsAlongRidgeForEdge(edge))
+          .sort(
+            (first, second) =>
+              segmentLength(midpoint(first.start, first.end), ridgeEnd) -
+              segmentLength(midpoint(second.start, second.end), ridgeEnd),
+          )[0];
+        if (!endEdge) return ridgeEnd;
+        const maximumElevation = maximumEaveElevationForEdge(endEdge.index);
+        const availableRise = Math.max(0.001, maximumElevation - roofBase);
+        const progress = Math.max(
+          0,
+          Math.min(
+            1,
+            (edgeElevation(endEdge.index) - roofBase) / availableRise,
+          ),
+        );
+        const edgeMiddle = midpoint(endEdge.start, endEdge.end);
+        return {
+          x: ridgeEnd.x + (edgeMiddle.x - ridgeEnd.x) * progress,
+          y: ridgeEnd.y,
+          z: ridgeEnd.z + (edgeMiddle.z - ridgeEnd.z) * progress,
+        };
+      };
+      const resolvedRidgeA = morphedRidgeEnd(ridgeA);
+      const resolvedRidgeB = morphedRidgeEnd(ridgeB);
       const nearestRidgeEnd = (point: Point2) =>
         dominantX
           ? Math.abs(point.x - ridgeA.x) <=
             Math.abs(point.x - ridgeB.x)
-            ? ridgeA
-            : ridgeB
+            ? resolvedRidgeA
+            : resolvedRidgeB
           : Math.abs(point.z - ridgeA.z) <=
               Math.abs(point.z - ridgeB.z)
-            ? ridgeA
-            : ridgeB;
+            ? resolvedRidgeA
+            : resolvedRidgeB;
       const faceDefinitions = edgeProfiles.map(
         ({
           edge,
@@ -2980,11 +3050,7 @@ export default function Home() {
           ownedPoints,
         }) => {
         const edgeMidpoint = midpoint(edge.start, edge.end);
-        const runsAlongRidge = dominantX
-          ? Math.abs(edge.end.x - edge.start.x) >=
-            Math.abs(edge.end.z - edge.start.z)
-          : Math.abs(edge.end.z - edge.start.z) >=
-            Math.abs(edge.end.x - edge.start.x);
+        const runsAlongRidge = runsAlongRidgeForEdge(edge);
         let targetStart = peak;
         let targetEnd = peak;
         if (roofKind === "hip") {
@@ -3573,6 +3639,7 @@ export default function Home() {
     showWalls,
     structuralCeilingFootprint,
     isTrussRoof,
+    maximumEaveElevationForEdge,
     trussBearingElevation,
     trussEnvelopeIssue,
     trussRoofBounds,
@@ -3708,6 +3775,10 @@ export default function Home() {
     selection?.kind === "wall"
       ? derivedSupportForWall(selection.index)
       : undefined;
+  const selectedEdgeMaximumElevation =
+    selection?.kind === "roof-edge"
+      ? maximumEaveElevationForEdge(selection.index)
+      : roofBase;
   const roomBounds = finishCeilingFootprint.reduce(
     (result, point) => ({
       minX: Math.min(result.minX, point.x),
@@ -4517,7 +4588,7 @@ export default function Home() {
                         Math.max(
                           0,
                           Math.min(
-                            40,
+                            maximumEaveElevationForEdge(selection.index),
                             drag.startElevation +
                               (drag.startY - event.clientY) / 9,
                           ),
@@ -4969,7 +5040,7 @@ export default function Home() {
                     <input
                       type="number"
                       min={0}
-                      max={40}
+                      max={selectedEdgeMaximumElevation}
                       step={0.25}
                       value={edgeElevation(selection.index)}
                       onChange={(event) => {
@@ -4977,7 +5048,10 @@ export default function Home() {
                         if (!Number.isFinite(value)) return;
                         updateRelationship(selection.index, {
                           elevationOffset:
-                            Math.max(0, Math.min(40, value)) - roofBase,
+                            Math.max(
+                              0,
+                              Math.min(selectedEdgeMaximumElevation, value),
+                            ) - roofBase,
                         });
                       }}
                     />
@@ -4988,10 +5062,15 @@ export default function Home() {
                   label="Raise / lower from shared bearing"
                   value={relationships[selection.index]?.elevationOffset ?? 0}
                   min={-8}
-                  max={8}
+                  max={selectedEdgeMaximumElevation - roofBase}
                   step={0.25}
                   output={
-                    (relationships[selection.index]?.elevationOffset ?? 0) === 0
+                    Math.abs(
+                      edgeElevation(selection.index) -
+                        selectedEdgeMaximumElevation,
+                    ) < 0.001
+                      ? "At maximum · gable limit"
+                      : (relationships[selection.index]?.elevationOffset ?? 0) === 0
                       ? "At base"
                       : `${(relationships[selection.index]?.elevationOffset ?? 0) > 0 ? "+" : ""}${feetInches(
                           relationships[selection.index]?.elevationOffset ?? 0,
@@ -5077,6 +5156,8 @@ export default function Home() {
                 moves both shared corners and the neighboring side eaves jog
                 down to meet them. Raising it keeps the neighboring roof
                 surfaces continuous without creating extra roof faces.
+                The maximum is set by the adjacent roof slopes; at that limit,
+                a Hip end resolves into a vertical gable end.
               </div>
               {isTrussRoof && trussEnvelopeIssue !== null && (
                 <div className="detail-inspector-note experimental-warning">
@@ -5096,6 +5177,10 @@ export default function Home() {
                       relationships[selection.index]?.elevationOffset ?? 0,
                     )}
                   </dd>
+                </div>
+                <div>
+                  <dt>Maximum allowed elevation</dt>
+                  <dd>{feetInches(selectedEdgeMaximumElevation)}</dd>
                 </div>
               </dl>
             </>
