@@ -149,6 +149,9 @@ test("truss systems use a guarded closed envelope and a roof-driven finish-only 
   assert.match(page, /stored rafter ceiling height and framing depth remain untouched/);
   assert.match(page, /\{!isTrussRoof && \(/);
   assert.match(page, /Experimental limitation/);
+  assert.match(page, /rgba\(205, 62, 52, 0\.27\)/);
+  assert.match(page, /INVALID TRUSS ENVELOPE · FALLBACK SHOWN/);
+  assert.match(page, /Transparent red fallback · envelope invalid/);
 });
 
 test("higher roof bearings create separate derived wall supports", async () => {

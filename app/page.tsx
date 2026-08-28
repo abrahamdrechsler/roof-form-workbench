@@ -3209,6 +3209,20 @@ export default function Home() {
               lineWidth: selectedRoof ? 2.2 : 1.15,
             });
           });
+        } else if (trussEnvelopeIssue !== null) {
+          const selectedRoof = selection?.kind === "roof";
+          faces.forEach(({ points }) => {
+            formRoofRegions.current.push(points.map(project));
+            modelSurfaces.push({
+              points,
+              pick: { kind: "roof" },
+              fill: selectedRoof
+                ? "rgba(205, 62, 52, 0.42)"
+                : "rgba(205, 62, 52, 0.27)",
+              stroke: selectedRoof ? "#7f1d1d" : "#a33b35",
+              lineWidth: selectedRoof ? 2.4 : 1.5,
+            });
+          });
         }
 
         roofEdges.forEach((edge) => {
@@ -3266,7 +3280,7 @@ export default function Home() {
           context.strokeRect(14, 14, Math.min(470, width - 28), 48);
           context.fillStyle = "#9b461f";
           context.font = "700 9px monospace";
-          context.fillText("EXPERIMENTAL TRUSS ENVELOPE PAUSED", 24, 33);
+          context.fillText("INVALID TRUSS ENVELOPE · FALLBACK SHOWN", 24, 33);
           context.font = "600 8px sans-serif";
           context.fillText(trussEnvelopeIssue, 24, 50);
         } else if (showDatums) {
@@ -5009,7 +5023,7 @@ export default function Home() {
                     {isTrussRoof
                       ? trussEnvelopeIssue === null
                         ? `Closed triangular prism · bottom chord ${feetInches(trussBearingElevation)}`
-                        : "Envelope paused"
+                        : "Transparent red fallback · envelope invalid"
                       : `${roofAssembly.structuralDepthInches.toFixed(3)}″ structure + ${roofAssembly.buildUpThicknessInches.toFixed(3)}″ build-up`}
                   </dd>
                 </div>
@@ -5281,7 +5295,7 @@ export default function Home() {
           {isTrussRoof
             ? trussEnvelopeIssue === null
               ? `closed truss envelope · bottom chord ${feetInches(trussBearingElevation)} · finish-only ceiling`
-              : "experimental envelope paused · see roof warning"
+              : "transparent red fallback · see roof warning"
             : `${roofAssembly.structuralDepthInches.toFixed(3)}″ structure + ${roofAssembly.buildUpThicknessInches.toFixed(3)}″ build-up · ceiling framing bottom ${feetInches(ceiling.bottomOfFramingElevationFeet)}`}
         </span>
       </footer>
